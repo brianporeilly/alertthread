@@ -1,0 +1,15 @@
+{
+  "receiver": "alertthread",
+  "status": "resolved",
+  "alerts": [],
+  "groupLabels": {
+    "alertname": "KubePodNotReady",
+    "job": "kube-state-metrics"
+  },
+  "commonLabels": {},
+  "commonAnnotations": {},
+  "externalURL": "http://alertmanager.observability.svc:9093",
+  "version": "4",
+  "groupKey": "{}/{severity=\"warning\"}:{alertname=\"KubePodNotReady\", job=\"kube-state-metrics\"}",
+  "truncatedAlerts": 0
+}

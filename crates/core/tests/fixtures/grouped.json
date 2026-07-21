@@ -1,0 +1,157 @@
+{
+  "receiver": "alertthread",
+  "status": "firing",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "KubePodNotReady",
+        "job": "kube-state-metrics",
+        "namespace": "media",
+        "pod": "plex-7d9f4c8b6-2xkqp",
+        "severity": "warning"
+      },
+      "annotations": {
+        "description": "Pod media/plex-7d9f4c8b6-2xkqp has been in a non-ready state for longer than 15 minutes.",
+        "runbook_url": "https://runbooks.prometheus-operator.dev/runbooks/kubernetes/kubepodnotready",
+        "summary": "Pod has been in a non-ready state for more than 15 minutes."
+      },
+      "startsAt": "2026-07-21T09:14:33.109Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://prometheus.observability.svc:9090/graph?g0.expr=kube_pod_status_ready",
+      "fingerprint": "0f1e2d3c4b5a6978"
+    },
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "KubePodNotReady",
+        "job": "kube-state-metrics",
+        "namespace": "media",
+        "pod": "sonarr-6c8b5d4f9-7wzlm",
+        "severity": "warning"
+      },
+      "annotations": {
+        "description": "Pod media/sonarr-6c8b5d4f9-7wzlm has been in a non-ready state for longer than 15 minutes.",
+        "runbook_url": "https://runbooks.prometheus-operator.dev/runbooks/kubernetes/kubepodnotready",
+        "summary": "Pod has been in a non-ready state for more than 15 minutes."
+      },
+      "startsAt": "2026-07-21T09:14:33.109Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://prometheus.observability.svc:9090/graph?g0.expr=kube_pod_status_ready",
+      "fingerprint": "1a2b3c4d5e6f7081"
+    },
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "KubePodNotReady",
+        "job": "kube-state-metrics",
+        "namespace": "media",
+        "pod": "radarr-5f7a9c2d1-qq48t",
+        "severity": "warning"
+      },
+      "annotations": {
+        "description": "Pod media/radarr-5f7a9c2d1-qq48t has been in a non-ready state for longer than 15 minutes.",
+        "runbook_url": "https://runbooks.prometheus-operator.dev/runbooks/kubernetes/kubepodnotready",
+        "summary": "Pod has been in a non-ready state for more than 15 minutes."
+      },
+      "startsAt": "2026-07-21T09:14:33.109Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://prometheus.observability.svc:9090/graph?g0.expr=kube_pod_status_ready",
+      "fingerprint": "2b3c4d5e6f708192"
+    },
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "KubePodNotReady",
+        "job": "kube-state-metrics",
+        "namespace": "media",
+        "pod": "prowlarr-84c6f5b7d-mn31v",
+        "severity": "warning"
+      },
+      "annotations": {
+        "description": "Pod media/prowlarr-84c6f5b7d-mn31v has been in a non-ready state for longer than 15 minutes.",
+        "runbook_url": "https://runbooks.prometheus-operator.dev/runbooks/kubernetes/kubepodnotready",
+        "summary": "Pod has been in a non-ready state for more than 15 minutes."
+      },
+      "startsAt": "2026-07-21T09:14:33.109Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://prometheus.observability.svc:9090/graph?g0.expr=kube_pod_status_ready",
+      "fingerprint": "3c4d5e6f708192a3"
+    },
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "KubePodNotReady",
+        "job": "kube-state-metrics",
+        "namespace": "media",
+        "pod": "bazarr-9d3e7f1a2-kk92x",
+        "severity": "warning"
+      },
+      "annotations": {
+        "description": "Pod media/bazarr-9d3e7f1a2-kk92x has been in a non-ready state for longer than 15 minutes.",
+        "runbook_url": "https://runbooks.prometheus-operator.dev/runbooks/kubernetes/kubepodnotready",
+        "summary": "Pod has been in a non-ready state for more than 15 minutes."
+      },
+      "startsAt": "2026-07-21T09:14:33.109Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://prometheus.observability.svc:9090/graph?g0.expr=kube_pod_status_ready",
+      "fingerprint": "4d5e6f708192a3b4"
+    },
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "KubePodNotReady",
+        "job": "kube-state-metrics",
+        "namespace": "media",
+        "pod": "sabnzbd-7b2c9e4d8-tt55h",
+        "severity": "warning"
+      },
+      "annotations": {
+        "description": "Pod media/sabnzbd-7b2c9e4d8-tt55h has been in a non-ready state for longer than 15 minutes.",
+        "runbook_url": "https://runbooks.prometheus-operator.dev/runbooks/kubernetes/kubepodnotready",
+        "summary": "Pod has been in a non-ready state for more than 15 minutes."
+      },
+      "startsAt": "2026-07-21T09:14:33.109Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://prometheus.observability.svc:9090/graph?g0.expr=kube_pod_status_ready",
+      "fingerprint": "5e6f708192a3b4c5"
+    },
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "KubePodNotReady",
+        "job": "kube-state-metrics",
+        "namespace": "media",
+        "pod": "recyclarr-6a1f8d3c5-zz07n",
+        "severity": "warning"
+      },
+      "annotations": {
+        "description": "Pod media/recyclarr-6a1f8d3c5-zz07n has been in a non-ready state for longer than 15 minutes.",
+        "runbook_url": "https://runbooks.prometheus-operator.dev/runbooks/kubernetes/kubepodnotready",
+        "summary": "Pod has been in a non-ready state for more than 15 minutes."
+      },
+      "startsAt": "2026-07-21T09:14:33.109Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://prometheus.observability.svc:9090/graph?g0.expr=kube_pod_status_ready",
+      "fingerprint": "6f708192a3b4c5d6"
+    }
+  ],
+  "groupLabels": {
+    "alertname": "KubePodNotReady",
+    "job": "kube-state-metrics"
+  },
+  "commonLabels": {
+    "alertname": "KubePodNotReady",
+    "job": "kube-state-metrics",
+    "namespace": "media",
+    "severity": "warning"
+  },
+  "commonAnnotations": {
+    "runbook_url": "https://runbooks.prometheus-operator.dev/runbooks/kubernetes/kubepodnotready",
+    "summary": "Pod has been in a non-ready state for more than 15 minutes."
+  },
+  "externalURL": "http://alertmanager.observability.svc:9093",
+  "version": "4",
+  "groupKey": "{}/{severity=\"warning\"}:{alertname=\"KubePodNotReady\", job=\"kube-state-metrics\"}",
+  "truncatedAlerts": 0
+}

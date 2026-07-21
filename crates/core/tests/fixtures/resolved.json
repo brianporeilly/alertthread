@@ -1,0 +1,45 @@
+{
+  "receiver": "alertthread",
+  "status": "resolved",
+  "alerts": [
+    {
+      "status": "resolved",
+      "labels": {
+        "alertname": "CephOSDDown",
+        "ceph_daemon": "osd.3",
+        "instance": "ceph-node-2:9283",
+        "job": "rook-ceph-mgr",
+        "namespace": "rook-ceph",
+        "severity": "critical"
+      },
+      "annotations": {
+        "description": "Ceph OSD osd.3 on ceph-node-2 is down.",
+        "summary": "An OSD has been marked down"
+      },
+      "startsAt": "2026-07-21T14:02:11.283Z",
+      "endsAt": "2026-07-21T14:31:41.283Z",
+      "generatorURL": "http://prometheus.observability.svc:9090/graph?g0.expr=ceph_osd_up+%3D%3D+0",
+      "fingerprint": "a1b2c3d4e5f60718"
+    }
+  ],
+  "groupLabels": {
+    "alertname": "CephOSDDown",
+    "job": "rook-ceph-mgr"
+  },
+  "commonLabels": {
+    "alertname": "CephOSDDown",
+    "ceph_daemon": "osd.3",
+    "instance": "ceph-node-2:9283",
+    "job": "rook-ceph-mgr",
+    "namespace": "rook-ceph",
+    "severity": "critical"
+  },
+  "commonAnnotations": {
+    "description": "Ceph OSD osd.3 on ceph-node-2 is down.",
+    "summary": "An OSD has been marked down"
+  },
+  "externalURL": "http://alertmanager.observability.svc:9093",
+  "version": "4",
+  "groupKey": "{}/{severity=\"critical\"}:{alertname=\"CephOSDDown\", job=\"rook-ceph-mgr\"}",
+  "truncatedAlerts": 0
+}
