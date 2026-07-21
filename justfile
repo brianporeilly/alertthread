@@ -142,7 +142,13 @@ mutants *ARGS:
     # caught by any test, so every one of them reports as a survivor — 41 of
     # them, drowning the handful that would mean something. `just mutants-pg`
     # is where they are actually tested.
-    cargo mutants --workspace --exclude 'crates/store/src/postgres.rs' {{ ARGS }}
+    #
+    # --test-tool nextest so mutants are judged by the same runner as `just
+    # test`. It also gives each test its own process, which matters for the
+    # store: `#[sqlx::test]` keeps a per-process connection pool, and a mutant
+    # that wedges one test should not slow the rest of the suite down with it.
+    cargo mutants --workspace --test-tool nextest \
+        --exclude 'crates/store/src/postgres.rs' {{ ARGS }}
 
 # Mutation testing for the PostgreSQL backend. Needs `just up`.
 #
@@ -158,7 +164,7 @@ mutants-pg *ARGS: check-engine
     fi
     # --file, not --exclude: with the SQLite backend switched off, mutating
     # sqlite.rs here would be the mirror image of the problem above.
-    cargo mutants --package alertthread-store \
+    cargo mutants --package alertthread-store --test-tool nextest \
         --no-default-features --features postgres \
         --file 'crates/store/src/postgres.rs' {{ ARGS }}
 
