@@ -13,6 +13,10 @@
 //! The statements below are kept in the same order as their SQLite counterparts, and the
 //! functions have the same names. Reading the two files side by side is the intended way to
 //! check that the dialects have not drifted; the conformance suite is what proves it.
+//!
+//! Where a piece of *logic* needed explaining rather than a piece of SQL, the explanation
+//! lives once, in `sqlite.rs`, next to the same code. Duplicating it here would mean two
+//! rationales to keep in step, and one of them would eventually stop being true.
 
 use std::str::FromStr;
 

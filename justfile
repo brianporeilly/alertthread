@@ -135,7 +135,32 @@ mutants *ARGS:
     # No --in-place: cargo-mutants copies the tree to a scratch directory by
     # default, so the working tree is never left holding a mutated source file
     # if a run is interrupted. `--in-place` is the opt-out and takes no value.
-    cargo mutants --workspace {{ ARGS }}
+    #
+    # postgres.rs is excluded here for the same reason the coverage gate is
+    # split: this run builds with default features, where that file is not
+    # compiled at all. A mutant in code the build does not contain cannot be
+    # caught by any test, so every one of them reports as a survivor — 41 of
+    # them, drowning the handful that would mean something. `just mutants-pg`
+    # is where they are actually tested.
+    cargo mutants --workspace --exclude 'crates/store/src/postgres.rs' {{ ARGS }}
+
+# Mutation testing for the PostgreSQL backend. Needs `just up`.
+#
+# The other half of `just mutants`. Same reasoning as the coverage gate: the
+# backend that needs a server is tested by the run that has one.
+mutants-pg *ARGS: check-engine
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export DATABASE_URL="${DATABASE_URL:-postgres://alertthread:alertthread@localhost:5432/alertthread}"
+    if ! {{ compose }} exec -T postgres pg_isready -U alertthread >/dev/null 2>&1; then
+        echo "PostgreSQL is not reachable — run 'just up' first." >&2
+        exit 1
+    fi
+    # --file, not --exclude: with the SQLite backend switched off, mutating
+    # sqlite.rs here would be the mirror image of the problem above.
+    cargo mutants --package alertthread-store \
+        --no-default-features --features postgres \
+        --file 'crates/store/src/postgres.rs' {{ ARGS }}
 
 # ---------------------------------------------------------------------------
 # Docs
