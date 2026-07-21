@@ -44,9 +44,9 @@ mod render;
 mod token;
 
 pub use client::{
-    AuthIdentity, DEFAULT_BASE_URL, DEFAULT_TIMEOUT, OwnedUpdate, PostMessage, PostedMessage,
+    AuthIdentity, DEFAULT_BASE_URL, DEFAULT_TIMEOUT, PostMessage, PostedMessage,
     RETRY_AFTER_DEFAULT, RETRY_AFTER_MAX, RETRY_AFTER_MIN, SlackClient, SlackClientBuilder,
-    UpdateMessage, update_group,
+    UpdateMessage,
 };
 pub use error::{Disposition, SlackError, SlackMethod};
 pub use message::{

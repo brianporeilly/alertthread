@@ -26,7 +26,7 @@ use alertthread_core::{ChannelId, Fingerprint, LabelMap, MessageTs, ThreadTs};
 use alertthread_slack::{
     AlertView, Disposition, MessageBody, PostMessage, RETRY_AFTER_DEFAULT, RETRY_AFTER_MAX,
     RETRY_AFTER_MIN, RenderRequest, Renderer, SlackClient, SlackError, SlackMethod, SlackToken,
-    TemplateKind, UpdateMessage, update_group,
+    TemplateKind, UpdateMessage,
 };
 use serde_json::json;
 use wiremock::matchers::{body_json_string, header, method, path};
@@ -387,9 +387,8 @@ async fn message_not_found_on_a_group_summary_asks_for_exactly_the_same_thing() 
     let channel = channel();
     let parent = ThreadTs::new("1784642520.000001");
     let body = body();
-    let owned = update_group(&channel, &parent, &body);
     let error = client(&server)
-        .update_message(&owned.as_request())
+        .update_message(&UpdateMessage::group(&channel, &parent, &body))
         .await
         .expect_err("message_not_found is an error");
 

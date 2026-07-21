@@ -436,16 +436,20 @@ struct AuthResponse {
 as_envelope!(AuthResponse);
 
 /// A `chat.postMessage` call.
-#[derive(Clone, Copy, Debug)]
+///
+/// Built through one of the three constructors rather than by hand. Each names the
+/// situation it is for, and between them they are the only three ways this relay posts a
+/// message — which is what keeps the two timestamp newtypes from having to be converted
+/// at a call site (AGENTS.md rule 4).
+#[derive(Clone, Debug)]
 pub struct PostMessage<'a> {
     /// Where to post. A `#name` or a `C…` ID; ADR 001 D8 keeps whatever the query
     /// parameter said.
     pub channel: &'a ChannelId,
     /// What to post.
     pub body: &'a MessageBody,
-    /// The storm-collapse parent to thread under, if this is a child (ADR 001 D5), or
-    /// the alert's own message if this is a resolve reply (D6).
-    pub thread_ts: Option<&'a ThreadTs>,
+    /// The message to thread under, if this is a reply.
+    pub thread_ts: Option<ThreadTs>,
     /// Whether a threaded reply is also echoed into the channel.
     ///
     /// `false` everywhere in this relay. D6 is explicit: the reply exists to generate an
@@ -456,6 +460,10 @@ pub struct PostMessage<'a> {
 
 impl<'a> PostMessage<'a> {
     /// A top-level message.
+    ///
+    /// A newly claimed alert, a storm-collapse parent, or an orphan resolve — ADR 002 §1.4
+    /// puts orphan resolves at top level deliberately, because burying a resolution inside
+    /// a firing summary hides the message most likely to be what a reader needs.
     #[must_use]
     pub const fn to_channel(channel: &'a ChannelId, body: &'a MessageBody) -> Self {
         Self {
@@ -466,25 +474,41 @@ impl<'a> PostMessage<'a> {
         }
     }
 
-    /// A reply threaded under `parent`.
+    /// A child alert, threaded under its storm-collapse parent (ADR 001 D5).
     #[must_use]
-    pub const fn in_thread(
-        channel: &'a ChannelId,
-        body: &'a MessageBody,
-        parent: &'a ThreadTs,
-    ) -> Self {
+    pub fn in_thread(channel: &'a ChannelId, body: &'a MessageBody, parent: &ThreadTs) -> Self {
         Self {
             channel,
             body,
-            thread_ts: Some(parent),
+            thread_ts: Some(parent.clone()),
             reply_broadcast: false,
         }
     }
 
-    fn wire(&self) -> WirePost<'a> {
+    /// The resolve reply, threaded under the alert's *own* message (ADR 001 D6).
+    ///
+    /// This is the one place a [`MessageTs`] legitimately becomes a [`ThreadTs`]: an
+    /// alert's message is the parent of its own resolve reply. Named, so the crossing is a
+    /// decision somebody took here rather than a conversion available everywhere — which
+    /// is the whole reason the two are separate types.
+    ///
+    /// `chat.update` does not notify, bump, or mark a channel unread, so the in-place edit
+    /// alone is invisible to anybody watching live. This reply is what generates the
+    /// unread indicator, and `reply_broadcast` stays `false` so it costs no channel noise.
+    #[must_use]
+    pub fn in_reply_to(channel: &'a ChannelId, body: &'a MessageBody, message: &MessageTs) -> Self {
+        Self {
+            channel,
+            body,
+            thread_ts: Some(ThreadTs::new(message.as_str())),
+            reply_broadcast: false,
+        }
+    }
+
+    fn wire(&self) -> WirePost<'_> {
         WirePost {
             channel: self.channel.as_str(),
-            thread_ts: self.thread_ts.map(ThreadTs::as_str),
+            thread_ts: self.thread_ts.as_ref().map(ThreadTs::as_str),
             reply_broadcast: self.reply_broadcast,
             body: self.body,
         }
@@ -492,12 +516,12 @@ impl<'a> PostMessage<'a> {
 }
 
 /// A `chat.update` call.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct UpdateMessage<'a> {
     /// The channel the message lives in.
     pub channel: &'a ChannelId,
     /// The message to rewrite.
-    pub ts: &'a MessageTs,
+    pub ts: MessageTs,
     /// Its replacement content.
     pub body: &'a MessageBody,
 }
@@ -505,52 +529,33 @@ pub struct UpdateMessage<'a> {
 impl<'a> UpdateMessage<'a> {
     /// An in-place edit of an alert's own message (ADR 001 D6, D7).
     #[must_use]
-    pub const fn new(channel: &'a ChannelId, ts: &'a MessageTs, body: &'a MessageBody) -> Self {
-        Self { channel, ts, body }
+    pub fn new(channel: &'a ChannelId, ts: &MessageTs, body: &'a MessageBody) -> Self {
+        Self {
+            channel,
+            ts: ts.clone(),
+            body,
+        }
     }
 
-    fn wire(&self) -> WireUpdate<'a> {
+    /// An in-place edit of a storm-collapse parent (ADR 001 D5, ADR 002 §1.3).
+    ///
+    /// The counterpart to [`PostMessage::in_reply_to`], and the other place the two
+    /// timestamp types legitimately cross: a group parent is addressed by `chat.update`
+    /// exactly like any other message, which is precisely the symmetry ADR 002 §1.3 says
+    /// was missing.
+    #[must_use]
+    pub fn group(channel: &'a ChannelId, parent: &ThreadTs, body: &'a MessageBody) -> Self {
+        Self {
+            channel,
+            ts: MessageTs::new(parent.as_str()),
+            body,
+        }
+    }
+
+    fn wire(&self) -> WireUpdate<'_> {
         WireUpdate {
             channel: self.channel.as_str(),
             ts: self.ts.as_str(),
-            body: self.body,
-        }
-    }
-}
-
-/// A `chat.update` of a storm-collapse parent (ADR 001 D5, ADR 002 §1.3).
-///
-/// Separate constructor rather than a `From<ThreadTs> for MessageTs`, because the two
-/// timestamps are different types on purpose (AGENTS.md rule 4) and the conversion should
-/// happen exactly where somebody has decided it is correct.
-#[must_use]
-pub fn update_group<'a>(
-    channel: &'a ChannelId,
-    parent: &ThreadTs,
-    body: &'a MessageBody,
-) -> OwnedUpdate<'a> {
-    OwnedUpdate {
-        channel,
-        ts: MessageTs::new(parent.as_str()),
-        body,
-    }
-}
-
-/// An [`UpdateMessage`] that owns its timestamp, for the group-summary path.
-#[derive(Clone, Debug)]
-pub struct OwnedUpdate<'a> {
-    channel: &'a ChannelId,
-    ts: MessageTs,
-    body: &'a MessageBody,
-}
-
-impl OwnedUpdate<'_> {
-    /// Borrows this as an [`UpdateMessage`].
-    #[must_use]
-    pub const fn as_request(&self) -> UpdateMessage<'_> {
-        UpdateMessage {
-            channel: self.channel,
-            ts: &self.ts,
             body: self.body,
         }
     }
@@ -619,7 +624,7 @@ mod tests {
 
     use super::{
         DEFAULT_BASE_URL, DEFAULT_TIMEOUT, PostMessage, PostedMessage, RETRY_AFTER_DEFAULT,
-        RETRY_AFTER_MAX, RETRY_AFTER_MIN, SlackClient, UpdateMessage, retry_after_of, update_group,
+        RETRY_AFTER_MAX, RETRY_AFTER_MIN, SlackClient, UpdateMessage, retry_after_of,
     };
     use crate::error::SlackError;
     use crate::message::{Colour, MessageBody};
@@ -811,15 +816,34 @@ mod tests {
     #[test]
     fn a_group_summary_update_crosses_the_two_timestamp_types_in_exactly_one_place() {
         // ADR 002 §1.3 needs the group parent updated the same way an alert message is.
-        // The conversion is a named function so that the crossing is a decision somebody
-        // took, not something a `From` impl made available everywhere.
+        // The conversion is a named constructor so that the crossing is a decision
+        // somebody took, not something a `From` impl made available everywhere.
         let channel = ChannelId::new("#alerts");
         let parent = ThreadTs::new("1721570520.000300");
         let body = body();
-        let owned = update_group(&channel, &parent, &body);
-        let request = owned.as_request();
+        let request = UpdateMessage::group(&channel, &parent, &body);
         assert_eq!(request.ts.as_str(), "1721570520.000300");
         assert_eq!(request.channel, &channel);
+    }
+
+    #[test]
+    fn a_resolve_reply_threads_under_the_alerts_own_message() {
+        // ADR 001 D6's other half. The parent of a resolve reply is the alert's own
+        // message, which is the one legitimate MessageTs -> ThreadTs crossing — and
+        // without a named constructor for it, every caller would do the conversion inline.
+        let channel = ChannelId::new("#alerts");
+        let body = body();
+        let own = MessageTs::new("1721570520.000100");
+        let request = PostMessage::in_reply_to(&channel, &body, &own);
+
+        assert_eq!(request.thread_ts, Some(ThreadTs::new("1721570520.000100")));
+        assert!(!request.reply_broadcast);
+
+        let json = serde_json::to_value(request.wire()).expect("request serialises");
+        assert_eq!(
+            json.get("thread_ts").and_then(|v| v.as_str()),
+            Some("1721570520.000100")
+        );
     }
 
     #[test]
