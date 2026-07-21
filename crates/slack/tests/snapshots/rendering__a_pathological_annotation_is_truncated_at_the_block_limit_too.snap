@@ -1,0 +1,5 @@
+---
+source: crates/slack/tests/rendering.rs
+expression: notice
+---
+:scissors: _truncated to fit Slack's limits — 253233 characters omitted. Shorten the annotation or the template._

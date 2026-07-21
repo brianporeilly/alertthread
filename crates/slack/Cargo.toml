@@ -11,6 +11,20 @@ authors.workspace = true
 
 [dependencies]
 alertthread-core.workspace = true
+chrono.workspace = true
+minijinja.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# `json` gives `assert_json_snapshot!`, which snapshots the serialised message
+# rather than a Rust `Debug` rendering. The JSON is what Slack sees, so it is
+# the thing worth freezing.
+insta = { workspace = true, features = ["json"] }
+tokio = { workspace = true }
+wiremock.workspace = true
 
 [lints]
 workspace = true

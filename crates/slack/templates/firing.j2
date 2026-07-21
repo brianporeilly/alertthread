@@ -1,0 +1,20 @@
+{#-
+  Built-in `firing` template (ADR 001 D10).
+
+  Receives one variable, `alert`. Every field of it is always defined and already
+  escaped for Slack; see docs/src/how-to/customize-templates.md for the full list.
+
+  Output is Slack `mrkdwn`. The colour bar, the attachment wrapper and the 3000-character
+  block limit are applied by the relay around whatever this produces, so a template only
+  ever decides wording.
+-#}
+*:rotating_light: FIRING · {{ alert.alertname }}*{% if alert.severity %} · `{{ alert.severity }}`{% endif %}
+{% if alert.summary %}{{ alert.summary }}
+{% endif %}
+{%- if alert.description and alert.description != alert.summary %}{{ alert.description }}
+{% endif %}
+{%- for key, value in alert.labels|items %}{% if key != "alertname" and key != "severity" %}`{{ key }}={{ value }}` {% endif %}{% endfor %}
+
+_firing since {{ alert.started_at }} · {{ alert.duration }}_
+{%- if alert.runbook_url %} · <{{ alert.runbook_url }}|runbook>{% endif %}
+{%- if alert.generator_url %} · <{{ alert.generator_url }}|source>{% endif %}

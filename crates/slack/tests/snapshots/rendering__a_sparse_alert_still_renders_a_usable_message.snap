@@ -1,0 +1,22 @@
+---
+source: crates/slack/tests/rendering.rs
+expression: snapshot_of(&rendered)
+---
+{
+  "attachments": [
+    {
+      "blocks": [
+        {
+          "text": {
+            "text": "*:rotating_light: FIRING · SomethingBroke*\n\n_firing since 2026-07-21 14:02:00 UTC · 1m 0s_",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        }
+      ],
+      "color": "#d40e0d",
+      "fallback": ":rotating_light: FIRING · SomethingBroke"
+    }
+  ],
+  "text": ":rotating_light: FIRING · SomethingBroke"
+}

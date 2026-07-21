@@ -1,0 +1,22 @@
+---
+source: crates/slack/tests/rendering.rs
+expression: snapshot_of(&rendered)
+---
+{
+  "attachments": [
+    {
+      "blocks": [
+        {
+          "text": {
+            "text": "*:white_check_mark: RESOLVED · 15 alerts* · KubePodNotReady\n\n_Alertmanager group_ `{}/{severity=\"critical\"}:{alertname=\"KubePodNotReady\", job=\"kube-state-metrics\"}`\n_Each alert is threaded under this message and updated there as it resolves._",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        }
+      ],
+      "color": "#2eb886",
+      "fallback": ":white_check_mark: RESOLVED · 15 alerts · KubePodNotReady"
+    }
+  ],
+  "text": ":white_check_mark: RESOLVED · 15 alerts · KubePodNotReady"
+}

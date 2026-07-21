@@ -1,0 +1,13 @@
+{#-
+  Built-in `resolved` template (ADR 001 D6, D10).
+
+  This replaces the original firing message in place via `chat.update`, so it is the
+  message somebody scrolling the channel history tomorrow will read.
+-#}
+*:white_check_mark: RESOLVED · {{ alert.alertname }}*{% if alert.severity %} · `{{ alert.severity }}`{% endif %}
+{% if alert.summary %}{{ alert.summary }}
+{% endif %}
+{%- for key, value in alert.labels|items %}{% if key != "alertname" and key != "severity" %}`{{ key }}={{ value }}` {% endif %}{% endfor %}
+
+_fired {{ alert.started_at }} → resolved {{ alert.resolved_at }} · duration {{ alert.duration }}_
+{%- if alert.generator_url %} · <{{ alert.generator_url }}|source>{% endif %}

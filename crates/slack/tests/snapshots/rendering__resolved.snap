@@ -1,0 +1,22 @@
+---
+source: crates/slack/tests/rendering.rs
+expression: snapshot_of(&rendered)
+---
+{
+  "attachments": [
+    {
+      "blocks": [
+        {
+          "text": {
+            "text": "*:white_check_mark: RESOLVED · CephOSDDown* · `critical`\nCeph OSD osd.3 is down\n`instance=ceph-node-2` `job=rook-ceph-mgr` `osd=osd.3`\n\n_fired 2026-07-21 14:02:00 UTC → resolved 2026-07-21 14:31:00 UTC · duration 29m 0s_ · <https://prometheus.example/graph?g0.expr=ceph_osd_up==0&amp;g0.tab=1|source>",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        }
+      ],
+      "color": "#2eb886",
+      "fallback": ":white_check_mark: RESOLVED · CephOSDDown · critical"
+    }
+  ],
+  "text": ":white_check_mark: RESOLVED · CephOSDDown · critical"
+}
