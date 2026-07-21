@@ -29,15 +29,19 @@ docker and use whichever you have**, so neither is a hard dependency and no conf
 is needed. This is also what lets CI run the same recipes on a Docker-only GitHub runner
 rather than installing podman to satisfy them.
 
-If you have both installed, podman wins the tie-break, because `compose.yaml` and the
-SELinux notes in these docs are written against it. Force the other way with:
+If you have both installed, docker wins the tie-break — not a statement of preference, but
+because docker's Compose v2 is a self-contained plugin, while `podman compose` delegates to
+an external provider that needs podman's API socket listening. The tie-break lands on
+whichever works with no further setup. Override it explicitly:
 
 ```
-CONTAINER_ENGINE=docker just up
+CONTAINER_ENGINE=podman just up
 ```
 
-`just up`, `just down` and `just test-pg` fail early with a clear message if no usable
-engine is found, rather than surfacing it as a confusing compose error later.
+`just up`, `just down`, `just test-pg` and the image build fail early with a clear message
+if no usable engine is found, rather than surfacing it as a confusing compose error later.
+The check contacts the engine rather than just looking for the binary, because an engine
+that is installed but not listening is the more common failure.
 
 Separately, and unrelated to which engine you run: **testcontainers is deliberately not
 used**. It needs a docker socket and its Ryuk reaper misbehaves under rootless podman.

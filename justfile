@@ -14,9 +14,17 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 # satisfy them.
 #
 # The order is only a tie-break for machines that have both, and it favours
-# podman because the compose file and the SELinux notes in the docs are written
-# against it. Force the other with CONTAINER_ENGINE=docker.
-engine := env_var_or_default("CONTAINER_ENGINE", `command -v podman >/dev/null 2>&1 && echo podman || echo docker`)
+# docker because docker's Compose v2 is a self-contained plugin, whereas
+# `podman compose` delegates to an external provider that then needs podman's
+# API socket listening. Preferring docker means the tie-break lands on the one
+# that works with no further setup.
+#
+# GitHub runners are exactly this case: they ship podman *and* docker, with
+# podman's socket inactive. Preferring podman there picks an engine whose
+# compose cannot connect — which is precisely how this was found.
+#
+# Force either one with CONTAINER_ENGINE=podman (or =docker).
+engine := env_var_or_default("CONTAINER_ENGINE", `command -v docker >/dev/null 2>&1 && echo docker || echo podman`)
 compose := engine + " compose"
 
 # Coverage output lives here; .gitignore'd.
@@ -153,6 +161,17 @@ check-engine:
         echo "error: '{{ compose }}' is not usable." >&2
         echo "       podman: needs 4.7+, plus podman-compose or docker-compose" >&2
         echo "       docker: needs the Compose v2 plugin" >&2
+        exit 1
+    fi
+    # `compose version` only proves the provider resolves — it never contacts
+    # the engine. `compose ps` does, which is what catches an engine that is
+    # installed but not listening. That distinction is not academic: it is the
+    # exact failure this preflight was added and then had to be fixed for.
+    if ! {{ compose }} ps >/dev/null 2>&1; then
+        echo "error: '{{ compose }}' cannot reach the {{ engine }} engine." >&2
+        echo "       podman: 'systemctl --user start podman.socket'" >&2
+        echo "       docker: check the daemon is running and you can reach it" >&2
+        echo "       or select the other engine with CONTAINER_ENGINE=..." >&2
         exit 1
     fi
 
