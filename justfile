@@ -66,11 +66,15 @@ test-pg:
     #!/usr/bin/env bash
     set -euo pipefail
     export DATABASE_URL="${DATABASE_URL:-postgres://alertthread:alertthread@localhost:5432/alertthread}"
-    if ! pg_isready -d "$DATABASE_URL" >/dev/null 2>&1; then
-        echo "PostgreSQL is not reachable at $DATABASE_URL — run 'just up' first." >&2
+    # Check readiness by exec'ing into the container rather than calling
+    # pg_isready on the host: the postgres client is not installed on a stock
+    # Fedora workstation or a GitHub runner, but it is always present in the
+    # postgres image.
+    if ! podman compose exec -T postgres pg_isready -U alertthread >/dev/null 2>&1; then
+        echo "PostgreSQL is not reachable — run 'just up' first." >&2
         exit 1
     fi
-    cargo nextest run --workspace --features postgres -- --include-ignored
+    cargo nextest run --package alertthread-store --features postgres -- --include-ignored
 
 # Coverage report only, no gate — for finding the gaps.
 coverage:

@@ -9,6 +9,14 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 
+[features]
+# Backend selection (ROADMAP Phase 2). Declared now, empty, so `just test-pg`
+# and the CI matrix resolve against real feature names rather than being
+# retrofitted later. Phase 2 attaches the sqlx drivers and migrations to them.
+default = ["sqlite"]
+sqlite = []
+postgres = []
+
 [dependencies]
 alertthread-core.workspace = true
 
