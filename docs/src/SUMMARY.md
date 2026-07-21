@@ -29,3 +29,4 @@
 
 - [PRD: problem statement](adr/000-prd.md)
 - [ADR 001: relay architecture](adr/001-adr.md)
+- [ADR 002: implementation gaps and corrections](adr/002-implementation-gaps.md)
