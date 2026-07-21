@@ -33,6 +33,10 @@ BANNED_IN_CORE=(
     async-std
     smol
     rusqlite
+    # Pulled in by chrono's `clock` feature on Linux. Its presence beneath the core means
+    # `Utc::now()` is nameable there, which is the one I/O the core is most likely to
+    # acquire by accident — a clock read looks like arithmetic at the call site.
+    iana-time-zone
 )
 
 # Crates that must never depend on each other, as `dependent:forbidden`.
@@ -69,6 +73,29 @@ for banned in "${BANNED_IN_CORE[@]}"; do
         failed=1
     fi
 done
+
+# AGENTS.md: "no clock reads. Time enters as a `now: DateTime<Utc>` parameter." Banning
+# `iana-time-zone` above catches chrono's `clock` feature on Linux, but chrono also has a
+# bare `now` feature that provides `Utc::now()` with no extra crates behind it — nothing
+# in the dependency *graph* would change. So the feature set is checked directly.
+#
+# Under resolver 3 `cargo tree --package` resolves features for the selected package
+# alone, so this stays honest once the shell enables `clock` for itself in Phase 4.
+echo "==> Checking alertthread-core cannot read a clock"
+core_features="$(cargo tree --package alertthread-core --edges normal --prefix none \
+    --format '{p} {f}' 2>/dev/null | grep -E '^chrono v' || true)"
+
+if [[ -z "$core_features" ]]; then
+    echo "  FAIL: alertthread-core does not depend on chrono at all."
+    echo "        This check assumes it does; if that changed deliberately, update it."
+    failed=1
+elif grep -qE '(^|,)(clock|now)(,|$)' <<<"${core_features#* }"; then
+    echo "  FAIL: alertthread-core's chrono has a clock feature enabled:"
+    echo "          ${core_features}"
+    echo "        That makes Utc::now() callable from the pure core. Time enters as a"
+    echo "        'now' parameter — the shell reads the clock and passes it in."
+    failed=1
+fi
 
 echo "==> Checking crate-to-crate dependency direction"
 for edge in "${FORBIDDEN_EDGES[@]}"; do

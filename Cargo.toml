@@ -23,7 +23,18 @@ alertthread-store = { path = "crates/store", version = "0.0.0" }
 
 anyhow = "1.0"
 axum = "0.8"
-chrono = { version = "0.4", features = ["serde"] }
+# `default-features = false` drops chrono's `clock` feature, and that is load-bearing
+# rather than tidiness. `clock` is what provides `Utc::now()` and it is the only way
+# `alertthread-core` could read a wall clock. AGENTS.md says time enters the core as a
+# `now:` parameter; this makes that a resolver fact rather than a review convention, and
+# scripts/check-deps.sh asserts it against the resolved graph.
+#
+# The shell will re-enable `clock` for itself in Phase 4 with
+# `chrono = { workspace = true, features = ["clock"] }`. Note that a workspace-wide build
+# unifies features, so that opt-in *will* make `Utc::now()` nameable from the core again
+# when the whole workspace is compiled together. The per-package check is what keeps the
+# rule enforced regardless.
+chrono = { version = "0.4", default-features = false, features = ["serde", "std"] }
 figment = { version = "0.10", features = ["env", "yaml"] }
 minijinja = "2.21"
 prometheus-client = "0.25"
