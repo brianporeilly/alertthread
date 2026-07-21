@@ -21,7 +21,7 @@ sessions that produced it.
 | **MSRV** | **1.94** — dictated by `sqlx` 0.9, not chosen |
 | Architecture | Functional core / imperative shell, in a 4-crate workspace |
 | Docs | Diátaxis, rendered by mdBook, written per-phase not at the end |
-| Test env | `podman compose` stack + `#[sqlx::test]`; no testcontainers |
+| Test env | compose stack on podman *or* docker + `#[sqlx::test]`; no testcontainers |
 | Task runner | `just` — **CI invokes the same recipes developers do** |
 | Coverage | Enforced per-crate, gating `just test` and `just ci` — see below |
 | Licence | Dual `MIT OR Apache-2.0` |
@@ -118,7 +118,7 @@ alertthread/
 ├── Cargo.toml                  # workspace root, [workspace.lints]
 ├── rust-toolchain.toml         # pinned toolchain
 ├── justfile                    # the only entry point for fmt/lint/test/run
-├── compose.yaml                # podman-compatible dev stack
+├── compose.yaml                # dev stack; podman or docker
 ├── Dockerfile                  # cargo-chef → musl static → scratch
 ├── AGENTS.md                   # contributor + agent constraints
 ├── deny.toml                   # cargo-deny: licences + advisories

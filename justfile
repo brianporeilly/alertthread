@@ -6,6 +6,19 @@
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
+# Container engine for the dev stack and image builds.
+#
+# Detected rather than hardcoded: this is not a podman-only project. Whichever
+# engine you have, the recipes work unchanged — which is what lets CI run these
+# same recipes on a Docker-only GitHub runner instead of installing podman to
+# satisfy them.
+#
+# The order is only a tie-break for machines that have both, and it favours
+# podman because the compose file and the SELinux notes in the docs are written
+# against it. Force the other with CONTAINER_ENGINE=docker.
+engine := env_var_or_default("CONTAINER_ENGINE", `command -v podman >/dev/null 2>&1 && echo podman || echo docker`)
+compose := engine + " compose"
+
 # Coverage output lives here; .gitignore'd.
 coverage_dir := justfile_directory() / "coverage"
 llvm_cov_json := coverage_dir / "llvm-cov.json"
@@ -62,7 +75,7 @@ test-fast:
     cargo nextest run --workspace
 
 # PostgreSQL conformance suite. Needs `just up` first.
-test-pg:
+test-pg: check-engine
     #!/usr/bin/env bash
     set -euo pipefail
     export DATABASE_URL="${DATABASE_URL:-postgres://alertthread:alertthread@localhost:5432/alertthread}"
@@ -70,7 +83,7 @@ test-pg:
     # pg_isready on the host: the postgres client is not installed on a stock
     # Fedora workstation or a GitHub runner, but it is always present in the
     # postgres image.
-    if ! podman compose exec -T postgres pg_isready -U alertthread >/dev/null 2>&1; then
+    if ! {{ compose }} exec -T postgres pg_isready -U alertthread >/dev/null 2>&1; then
         echo "PostgreSQL is not reachable — run 'just up' first." >&2
         exit 1
     fi
@@ -111,18 +124,48 @@ check-links:
 # Dev stack
 # ---------------------------------------------------------------------------
 
-# Start the podman compose dev stack (postgres + slack-mock).
-up:
+# Start the compose dev stack (postgres + slack-mock) on podman or docker.
+up: check-engine
     # --build so a changed slack-mock does not silently run as a stale image.
     # Layer caching makes the no-op case cheap.
-    podman compose up -d --build
+    {{ compose }} up -d --build
     @echo "Waiting for PostgreSQL..."
-    @timeout 60 bash -c 'until podman compose exec -T postgres pg_isready -U alertthread >/dev/null 2>&1; do sleep 1; done'
-    @echo "Dev stack up."
+    @timeout 60 bash -c 'until {{ compose }} exec -T postgres pg_isready -U alertthread >/dev/null 2>&1; do sleep 1; done'
+    @echo "Dev stack up ({{ engine }})."
 
 # Stop the dev stack and remove its volumes.
-down:
-    podman compose down --volumes
+down: check-engine
+    {{ compose }} down --volumes
+
+# Fail early and legibly when no usable container engine is present, rather
+# than surfacing it as a confusing compose error three commands later.
+# Private so `just --list` shows exactly the recipe set AGENTS.md documents.
+[private]
+check-engine:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v {{ engine }} >/dev/null 2>&1; then
+        echo "error: no container engine found — looked for podman, then docker." >&2
+        echo "       install one, or set CONTAINER_ENGINE to the name of yours." >&2
+        exit 1
+    fi
+    if ! {{ compose }} version >/dev/null 2>&1; then
+        echo "error: '{{ compose }}' is not usable." >&2
+        echo "       podman: needs 4.7+, plus podman-compose or docker-compose" >&2
+        echo "       docker: needs the Compose v2 plugin" >&2
+        exit 1
+    fi
+
+# Build the release image and smoke-test that it actually runs.
+#
+# The static musl build on a scratch base is the highest-risk assumption in
+# ADR 001. Building it on every PR is what stops it silently regressing: a
+# dependency that cannot link statically breaks the image, not the test suite.
+[private]
+image TAG="localhost/alertthread:dev": check-engine
+    {{ engine }} build -t {{ TAG }} .
+    {{ engine }} run --rm {{ TAG }}
+    @{{ engine }} images {{ TAG }}
 
 # ---------------------------------------------------------------------------
 # CI

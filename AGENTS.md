@@ -159,7 +159,7 @@ just test-pg    # postgres conformance (needs `just up`)
 just coverage   # report only, no gate — for finding the gaps
 just mutants    # mutation testing; required for core changes
 just docs       # mdbook build + link check
-just up/down    # podman compose dev stack
+just up/down    # compose dev stack (podman or docker, auto-detected)
 just ci         # everything CI runs, including the coverage gate
 ```
 
@@ -178,7 +178,12 @@ Real ones, discovered the hard way. Each has cost somebody time.
 - **MSRV is 1.94**, dictated by `sqlx` 0.9, not chosen. Do not use newer language features
   without raising it deliberately.
 - **SELinux, on Fedora.** Bind mounts in `compose.yaml` need `:z` or `:Z`, or the container
-  gets permission denied for reasons that look nothing like SELinux.
+  gets permission denied for reasons that look nothing like SELinux. Docker users will not
+  reproduce this, which is exactly why it is easy to break for everyone else.
+- **The container engine is detected, not assumed.** `just` picks podman or docker,
+  whichever is installed. Never hardcode either one in a recipe, a workflow, or
+  `compose.yaml` — use `{{ engine }}` / `{{ compose }}`. CI relies on this to run the same
+  recipes on a Docker-only runner.
 - **`chrono`, not `jiff`**, throughout — deliberate, for `sqlx` compatibility. Do not
   introduce a second time type.
 - **Slack allows ~1 `chat.postMessage` per second per channel**, thread replies included.

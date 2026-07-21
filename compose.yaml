@@ -1,6 +1,8 @@
-# Local development stack. Podman-native — there is no docker here.
+# Local development stack.
 #
-# Started and stopped with `just up` / `just down`.
+# Started and stopped with `just up` / `just down`, which detect podman or
+# docker and use whichever is installed. Nothing in this file is specific to
+# either engine; keep it that way.
 #
 # ⚠️ SELinux, on Fedora. This file uses a *named volume* for PostgreSQL data
 # rather than a bind mount, which sidesteps relabelling entirely — podman

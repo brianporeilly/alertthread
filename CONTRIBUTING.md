@@ -8,8 +8,9 @@ mechanics of getting set up.
 
 ## Setup
 
-You need a Rust toolchain and podman. The toolchain version is pinned in
-`rust-toolchain.toml` and rustup will install it automatically on first build.
+You need a Rust toolchain and a container engine — **either podman or docker**. The
+toolchain version is pinned in `rust-toolchain.toml` and rustup will install it
+automatically on first build.
 
 ```
 # Rust
@@ -21,9 +22,26 @@ cargo install cargo-binstall
 cargo binstall just cargo-nextest cargo-llvm-cov cargo-mutants cargo-deny mdbook
 ```
 
-`podman` is required for the dev stack and the container build. **There is no docker
-dependency anywhere in this project**, and testcontainers is deliberately not used — it
-needs a docker socket and its Ryuk reaper misbehaves under rootless podman.
+### Container engine
+
+The dev stack and the image build need a container engine. The recipes **detect podman or
+docker and use whichever you have**, so neither is a hard dependency and no configuration
+is needed. This is also what lets CI run the same recipes on a Docker-only GitHub runner
+rather than installing podman to satisfy them.
+
+If you have both installed, podman wins the tie-break, because `compose.yaml` and the
+SELinux notes in these docs are written against it. Force the other way with:
+
+```
+CONTAINER_ENGINE=docker just up
+```
+
+`just up`, `just down` and `just test-pg` fail early with a clear message if no usable
+engine is found, rather than surfacing it as a confusing compose error later.
+
+Separately, and unrelated to which engine you run: **testcontainers is deliberately not
+used**. It needs a docker socket and its Ryuk reaper misbehaves under rootless podman.
+Integration tests use `#[sqlx::test]`, which creates an isolated database per test.
 
 Verify everything works:
 

@@ -117,10 +117,11 @@ what the container image actually measures and why.
 just            # list recipes
 just test-fast  # inner loop
 just ci         # everything CI runs, including the coverage gate
-just up/down    # podman compose dev stack
+just up/down    # compose dev stack (podman or docker)
 ```
 
-Requires a Rust toolchain (pinned in `rust-toolchain.toml`) and podman. See
+Requires a Rust toolchain (pinned in `rust-toolchain.toml`) and either podman or
+docker. See
 [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full setup, and
 [`AGENTS.md`](AGENTS.md) for the constraints this codebase holds itself to.
 

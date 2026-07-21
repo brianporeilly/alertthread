@@ -7,7 +7,7 @@ resolve in a local fake Slack — with no Slack workspace and no Kubernetes clus
 
 The path it will walk:
 
-1. `just up` — start the podman compose stack.
+1. `just up` — start the compose stack (podman or docker, auto-detected).
 2. Run `alertthread` against it.
 3. Fire a real Prometheus rule, let Alertmanager group it and deliver the webhook.
 4. Watch the message appear in the slack-mock UI.

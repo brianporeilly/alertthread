@@ -71,21 +71,8 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      # On a GitHub runner `podman compose` finds docker-compose as its
-      # external provider, and docker-compose speaks the Docker API — which
-      # podman only serves once its socket is listening. On Fedora the socket
-      # is already up, which is why this is needed here and not locally.
-      # It is CI plumbing, not a change to what is tested.
-      - name: Start the rootless podman API socket
-        run: |
-          systemctl --user enable --now podman.socket
-          socket="$(podman info --format '{{.Host.RemoteSocket.Path}}')"
-          for _ in $(seq 1 30); do
-            [ -S "$socket" ] && break
-            sleep 1
-          done
-          test -S "$socket" || { echo "podman socket never appeared at $socket" >&2; exit 1; }
-          echo "DOCKER_HOST=unix://$socket" >> "$GITHUB_ENV"
+      # No container-engine setup: the recipes detect podman or docker and use
+      # whichever is present, so a Docker-only runner needs no preparation.
       # The stack is started through the same recipe developers use rather
       # than through a `services:` block, so the compose file itself is under
       # test too.
@@ -147,14 +134,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      # The static musl build against a scratch base is the highest-risk
-      # assumption in ADR 001 (validated in Phase 0). Building it on every PR
-      # is what stops it silently regressing — a dependency that cannot link
-      # statically breaks the image, not the test suite.
-      - run: podman build -t localhost/alertthread:ci .
-      - run: podman run --rm localhost/alertthread:ci
-      - name: Report image size
-        run: podman images --format '{{.Repository}}:{{.Tag}} {{.Size}}' localhost/alertthread
+      - uses: extractions/setup-just@v3
+      # Built through the same recipe developers use, on whichever engine the
+      # runner has. The rationale for building it on every PR is in the recipe.
+      - run: just image localhost/alertthread:ci
 
   # Single required status check, so branch protection does not need updating
   # every time a job is added.
