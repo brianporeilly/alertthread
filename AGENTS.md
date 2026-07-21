@@ -90,10 +90,16 @@ Testing is not a phase. A change without tests is not done.
 | Crate | Threshold |
 |---|---|
 | `alertthread-core` | **100%** |
-| `alertthread-store` | 95% |
+| `alertthread-store` | 95% — gated twice, see below |
 | `alertthread-slack` | 95% |
 | `alertthread` (app) | 95% — `main.rs` excluded |
 | `dev/slack-mock` | excluded |
+
+`alertthread-store` has two backends behind cargo features and no single build can run the
+tests for both. `just test` compiles SQLite only and `just test-pg` compiles PostgreSQL only,
+and each gates the store at 95% against the code it actually compiled. **Both must pass.**
+Adding a backend means adding a gated build, not widening an existing one. Rationale in
+ROADMAP.md and `scripts/coverage-gate.py`.
 
 Use `just test-fast` in the inner loop; instrumentation costs 2–3× runtime. It is a
 convenience, not a way around the gate.

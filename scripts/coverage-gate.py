@@ -9,7 +9,13 @@ testable and how critical each crate actually is puts the strictest bar exactly
 where the risk lives. See ROADMAP.md "Coverage policy".
 
 Usage:
-    coverage-gate.py <llvm-cov-export.json>
+    coverage-gate.py <llvm-cov-export.json> [--profile <name>]
+
+Profiles exist because `alertthread-store` ships two backends behind cargo
+features and no single build can run the tests for both. `just test` has no
+containers, so it compiles SQLite only; `just test-pg` has PostgreSQL, so it
+compiles PostgreSQL only. Each build is gated against the code it actually
+compiled, at the same 95% threshold. See "Two gated builds, one crate" below.
 """
 
 from __future__ import annotations
@@ -24,19 +30,50 @@ from pathlib import Path
 # threshold or adding an exclusion requires saying so in the PR description and
 # justifying it — AGENTS.md calls silently weakening this gate "the one move
 # that is never acceptable here".
-THRESHOLDS: list[tuple[str, str, float]] = [
+WORKSPACE: list[tuple[str, str, float]] = [
     # Pure, no I/O, no clock, no runtime. Every branch is reachable with a plain
     # function call, so anything below 100% is dead code or an untested branch —
     # and this crate holds every correctness decision in the project.
     ("alertthread-core", "crates/core/src", 100.0),
     # Conformance suite covers the trait exhaustively; the residue is
     # driver-level error paths that need fault injection to reach.
+    #
+    # This build compiles the SQLite backend only — see below.
     ("alertthread-store", "crates/store/src", 95.0),
     # wiremock covers the API surface; the residue is reqwest transport failures.
     ("alertthread-slack", "crates/slack/src", 95.0),
     # Handlers, workers, config and the rate limiter are all directly testable.
     ("alertthread (app)", "crates/app/src", 95.0),
 ]
+
+# ---------------------------------------------------------------------------
+# Two gated builds, one crate
+# ---------------------------------------------------------------------------
+# `alertthread-store` has two backends behind cargo features, and the tests for
+# one of them need a PostgreSQL server. `just test` runs with no containers, so
+# if PostgresStore were compiled into that build its several hundred lines would
+# be counted as uncovered and drag the crate under 95% — and the only ways to
+# make that pass would be to lower the threshold or to blanket-exclude the file,
+# both of which AGENTS.md rules out, and a store backend is the last place to do
+# either.
+#
+# So neither build is asked about code it cannot run:
+#
+#   just test     --workspace, default features       -> SQLite backend, gated
+#   just test-pg  -p store --no-default-features -F postgres -> PG backend, gated
+#
+# `crates/store/src` appears in both, at the same threshold, because the shared
+# code (the trait, the payload format, the row mapping) is exercised by both and
+# each backend is exercised by exactly one. Nothing is unmeasured, and nothing is
+# measured against tests that could not have run.
+STORE_POSTGRES: list[tuple[str, str, float]] = [
+    ("alertthread-store (pg)", "crates/store/src", 95.0),
+]
+
+PROFILES: dict[str, list[tuple[str, str, float]]] = {
+    "workspace": WORKSPACE,
+    "store-postgres": STORE_POSTGRES,
+}
 
 # Excluded outright, rather than absorbed by a softer threshold. An explicit,
 # justified exclusion is honest; a soft threshold hides how well the code that
@@ -52,11 +89,31 @@ def is_excluded(rel_path: str) -> bool:
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
+    args = sys.argv[1:]
+    profile_name = "workspace"
+
+    if "--profile" in args:
+        index = args.index("--profile")
+        if index + 1 >= len(args):
+            print("coverage gate: --profile needs a name", file=sys.stderr)
+            return 2
+        profile_name = args[index + 1]
+        del args[index : index + 2]
+
+    if len(args) != 1:
         print(__doc__, file=sys.stderr)
         return 2
 
-    export_path = Path(sys.argv[1])
+    thresholds = PROFILES.get(profile_name)
+    if thresholds is None:
+        known = ", ".join(sorted(PROFILES))
+        print(
+            f"coverage gate: unknown profile {profile_name!r}; known: {known}",
+            file=sys.stderr,
+        )
+        return 2
+
+    export_path = Path(args[0])
     if not export_path.is_file():
         print(f"coverage gate: no coverage data at {export_path}", file=sys.stderr)
         return 2
@@ -78,7 +135,7 @@ def main() -> int:
     # Aggregate raw line counts per crate. Summing counts is correct;
     # averaging the per-file percentages is not, because it weights a 3-line
     # file the same as a 300-line one.
-    totals: dict[str, list[int]] = {label: [0, 0] for label, _, _ in THRESHOLDS}
+    totals: dict[str, list[int]] = {label: [0, 0] for label, _, _ in thresholds}
     excluded_files: list[str] = []
 
     for entry in files:
@@ -97,21 +154,21 @@ def main() -> int:
         count = int(lines.get("count", 0))
         covered = int(lines.get("covered", 0))
 
-        for label, prefix, _ in THRESHOLDS:
+        for label, prefix, _ in thresholds:
             if rel.startswith(prefix):
                 totals[label][0] += covered
                 totals[label][1] += count
                 break
 
     print()
-    print("Per-crate line coverage")
+    print(f"Per-crate line coverage ({profile_name})")
     print("=" * 62)
     print(f"{'crate':<22} {'covered':>9} {'lines':>8} {'actual':>8} {'min':>7}  ")
     print("-" * 62)
 
     failures: list[str] = []
 
-    for label, _, threshold in THRESHOLDS:
+    for label, _, threshold in thresholds:
         covered, count = totals[label]
         if count == 0:
             # No instrumented lines at all. This is a real state during
