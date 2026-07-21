@@ -1,0 +1,18 @@
+# cargo-mutants configuration.
+#
+# Coverage proves a line ran; mutation testing proves a test would have caught the
+# regression. For a system whose worst failure mode is silence, that is the question
+# that matters, so `alertthread-core` is gated on zero survivors (AGENTS.md).
+#
+# The exclusions below are the same two the coverage gate already applies, for the same
+# reasons, rather than a second and quietly different list:
+#
+#   * `crates/app/src/main.rs` — wiring and signal handling. Its only mutant is "replace
+#     main with ()", which no test can catch by construction: a test that asserted `main`
+#     had run would be asserting on the process, not on behaviour. Excluding it is honest;
+#     leaving a permanent known survivor in the report is how a report stops being read.
+#   * `dev/slack-mock/` — development tooling, not shipped.
+#
+# Adding to this list requires the same justification in a PR description that lowering a
+# coverage threshold does. See ROADMAP.md "Coverage policy".
+exclude_globs = ["crates/app/src/main.rs", "dev/slack-mock/**"]

@@ -18,6 +18,18 @@ authors.workspace = true
 # violated, and CI runs that recipe. See scripts/check-deps.sh.
 # ---------------------------------------------------------------------------
 [dependencies]
+# chrono without `clock`: see the comment on the workspace dependency. `Utc::now()`
+# does not exist in this crate, by construction.
+chrono.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# Test-only. The golden fixtures are `include_str!`d at compile time and parsed here,
+# so the crate still performs no filesystem I/O — and `--edges normal` in
+# scripts/check-deps.sh means a dev-dependency cannot smuggle anything into the
+# shipped graph.
+serde_json.workspace = true
 
 [lints]
 workspace = true

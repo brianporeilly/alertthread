@@ -1,0 +1,75 @@
+{
+  "receiver": "alertthread",
+  "status": "firing",
+  "alerts": [
+    {
+      "status": "resolved",
+      "labels": {
+        "alertname": "KubePodNotReady",
+        "job": "kube-state-metrics",
+        "namespace": "media",
+        "pod": "plex-7d9f4c8b6-2xkqp",
+        "severity": "warning"
+      },
+      "annotations": {
+        "summary": "Pod has been in a non-ready state for more than 15 minutes."
+      },
+      "startsAt": "2026-07-21T09:14:33.109Z",
+      "endsAt": "2026-07-21T09:41:03.109Z",
+      "generatorURL": "http://prometheus.observability.svc:9090/graph?g0.expr=kube_pod_status_ready",
+      "fingerprint": "0f1e2d3c4b5a6978"
+    },
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "KubePodNotReady",
+        "job": "kube-state-metrics",
+        "namespace": "media",
+        "pod": "sonarr-6c8b5d4f9-7wzlm",
+        "severity": "warning"
+      },
+      "annotations": {
+        "summary": "Pod has been in a non-ready state for more than 15 minutes."
+      },
+      "startsAt": "2026-07-21T09:14:33.109Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://prometheus.observability.svc:9090/graph?g0.expr=kube_pod_status_ready",
+      "fingerprint": "1a2b3c4d5e6f7081"
+    },
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "KubePodNotReady",
+        "job": "kube-state-metrics",
+        "namespace": "media",
+        "pod": "radarr-5f7a9c2d1-qq48t",
+        "severity": "warning"
+      },
+      "annotations": {
+        "summary": "Pod has been in a non-ready state for more than 15 minutes."
+      },
+      "startsAt": "2026-07-21T09:26:03.109Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://prometheus.observability.svc:9090/graph?g0.expr=kube_pod_status_ready",
+      "fingerprint": "2b3c4d5e6f708192"
+    }
+  ],
+  "groupLabels": {
+    "alertname": "KubePodNotReady",
+    "job": "kube-state-metrics"
+  },
+  "commonLabels": {
+    "alertname": "KubePodNotReady",
+    "job": "kube-state-metrics",
+    "namespace": "media",
+    "severity": "warning"
+  },
+  "commonAnnotations": {
+    "summary": "Pod has been in a non-ready state for more than 15 minutes."
+  },
+  "externalURL": "http://alertmanager.observability.svc:9093",
+  "version": "4",
+  "groupKey": "{}/{severity=\"warning\"}:{alertname=\"KubePodNotReady\", job=\"kube-state-metrics\"}",
+  "truncatedAlerts": 0,
+  "notification_reason": "update"
+}

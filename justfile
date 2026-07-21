@@ -112,7 +112,10 @@ coverage:
 #
 # Mutation testing. Required for any change to alertthread-core.
 mutants *ARGS:
-    cargo mutants --workspace --in-place=false {{ ARGS }}
+    # No --in-place: cargo-mutants copies the tree to a scratch directory by
+    # default, so the working tree is never left holding a mutated source file
+    # if a run is interrupted. `--in-place` is the opt-out and takes no value.
+    cargo mutants --workspace {{ ARGS }}
 
 # ---------------------------------------------------------------------------
 # Docs
