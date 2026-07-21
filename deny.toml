@@ -36,6 +36,17 @@ allow = [
     "BSD-3-Clause",
     "BSL-1.0",
     "CC0-1.0",
+    # `webpki-roots`, which is Mozilla's CA certificate set redistributed as a
+    # Rust crate. CDLA-Permissive-2.0 is a permissive *data* licence — no
+    # copyleft, no attribution requirement on downstream binaries — and it is
+    # the licence that bundle has carried since it was split out.
+    #
+    # It arrives with sqlx's `tls-rustls-ring-webpki` feature, and that feature
+    # is the one we want: bundled roots mean the store's TLS works inside the
+    # `scratch` runtime image without a system trust store. The alternative,
+    # `tls-rustls-ring-native-roots`, would make a PostgreSQL connection depend
+    # on a certificate bundle the image does not otherwise need.
+    "CDLA-Permissive-2.0",
     "ISC",
     "MIT",
     "MIT-0",
