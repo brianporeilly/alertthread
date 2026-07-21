@@ -52,6 +52,27 @@ Excluding `main.rs` outright is deliberate and preferable to setting the app thr
 enough to absorb it. An explicit, justified exclusion is honest; a soft threshold hides how
 well the code that *does* matter is covered.
 
+### `alertthread-store` is gated twice, at the same threshold
+
+The store ships two backends behind cargo features, and the tests for one of them need a
+PostgreSQL server. `just test` has no containers, so compiling `PostgresStore` into that
+build would count its several hundred lines as uncovered and drag the crate under 95% — and
+the only ways to make that pass would be to lower the threshold or to blanket-exclude the
+file. Neither is acceptable, and a store backend is the last place to do either.
+
+So neither build is asked about code it cannot run:
+
+| Recipe | Compiles | Gated at |
+|---|---|---|
+| `just test` | `--workspace`, default features → SQLite backend | 95% |
+| `just test-pg` | `-p store --no-default-features -F postgres` → PostgreSQL backend | 95% |
+
+`crates/store/src` is measured in both. The shared code — the trait, the outbox payload
+format, the row mapping — is exercised by both; each backend is exercised by exactly one.
+Nothing ends up unmeasured, and nothing is measured against tests that could not have run.
+`scripts/coverage-gate.py --profile store-postgres` is the second gate; CI's `test-pg` job
+runs it.
+
 ### Coverage is a floor, not the goal
 
 Line coverage proves a line *executed*. It does not prove an assertion would have caught a

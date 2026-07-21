@@ -1,4 +1,10 @@
 /target
+# `#[sqlx::test]` puts one SQLite database per test in `target/sqlx/test-dbs/`,
+# relative to the *test's* working directory — which nextest sets to the crate
+# root, not the workspace root. So the store crate grows a `target/` of its own
+# the first time the conformance suite runs.
+crates/*/target/
+dev/*/target/
 **/*.rs.bk
 *.pdb
 

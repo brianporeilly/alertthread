@@ -31,6 +31,16 @@ compose := engine + " compose"
 coverage_dir := justfile_directory() / "coverage"
 llvm_cov_json := coverage_dir / "llvm-cov.json"
 
+# The PostgreSQL backend is measured by its own run, into its own file.
+#
+# `alertthread-store` has two backends behind cargo features and no single build
+# can run the tests for both: `just test` has no containers. So `just test`
+# compiles SQLite only and `just test-pg` compiles PostgreSQL only, and each is
+# gated at the same 95% threshold against the code it actually compiled. Neither
+# backend is left unmeasured, and neither is measured against tests that could
+# not have run. Rationale in full: scripts/coverage-gate.py.
+pg_cov_json := coverage_dir / "llvm-cov-postgres.json"
+
 # main.rs is wiring and signal handling; slack-mock is dev tooling, not shipped.
 # Both exclusions are policy, stated in ROADMAP.md, and enforced identically by
 # the gate script — this regex only keeps them out of the HTML report too.
@@ -82,7 +92,7 @@ test:
 test-fast:
     cargo nextest run --workspace
 
-# PostgreSQL conformance suite. Needs `just up` first.
+# PostgreSQL conformance suite, instrumented, with its own coverage gate. Needs `just up`.
 test-pg: check-engine
     #!/usr/bin/env bash
     set -euo pipefail
@@ -95,7 +105,17 @@ test-pg: check-engine
         echo "PostgreSQL is not reachable — run 'just up' first." >&2
         exit 1
     fi
-    cargo nextest run --package alertthread-store --features postgres -- --include-ignored
+    mkdir -p {{ coverage_dir }}
+    # --no-default-features drops the SQLite backend from this build. That is
+    # what makes the gate below meaningful: it measures PostgreSQL against the
+    # tests that just ran, rather than against a SQLite backend whose tests ran
+    # in a different invocation.
+    cargo llvm-cov --package alertthread-store \
+        --no-default-features --features postgres \
+        --ignore-filename-regex '{{ ignore_regex }}' \
+        --json --output-path {{ pg_cov_json }} \
+        nextest
+    ./scripts/coverage-gate.py {{ pg_cov_json }} --profile store-postgres
 
 # Coverage report only, no gate — for finding the gaps.
 coverage:
@@ -115,7 +135,38 @@ mutants *ARGS:
     # No --in-place: cargo-mutants copies the tree to a scratch directory by
     # default, so the working tree is never left holding a mutated source file
     # if a run is interrupted. `--in-place` is the opt-out and takes no value.
-    cargo mutants --workspace {{ ARGS }}
+    #
+    # postgres.rs is excluded here for the same reason the coverage gate is
+    # split: this run builds with default features, where that file is not
+    # compiled at all. A mutant in code the build does not contain cannot be
+    # caught by any test, so every one of them reports as a survivor — 41 of
+    # them, drowning the handful that would mean something. `just mutants-pg`
+    # is where they are actually tested.
+    #
+    # --test-tool nextest so mutants are judged by the same runner as `just
+    # test`. It also gives each test its own process, which matters for the
+    # store: `#[sqlx::test]` keeps a per-process connection pool, and a mutant
+    # that wedges one test should not slow the rest of the suite down with it.
+    cargo mutants --workspace --test-tool nextest \
+        --exclude 'crates/store/src/postgres.rs' {{ ARGS }}
+
+# Mutation testing for the PostgreSQL backend. Needs `just up`.
+#
+# The other half of `just mutants`. Same reasoning as the coverage gate: the
+# backend that needs a server is tested by the run that has one.
+mutants-pg *ARGS: check-engine
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export DATABASE_URL="${DATABASE_URL:-postgres://alertthread:alertthread@localhost:5432/alertthread}"
+    if ! {{ compose }} exec -T postgres pg_isready -U alertthread >/dev/null 2>&1; then
+        echo "PostgreSQL is not reachable — run 'just up' first." >&2
+        exit 1
+    fi
+    # --file, not --exclude: with the SQLite backend switched off, mutating
+    # sqlite.rs here would be the mirror image of the problem above.
+    cargo mutants --package alertthread-store --test-tool nextest \
+        --no-default-features --features postgres \
+        --file 'crates/store/src/postgres.rs' {{ ARGS }}
 
 # ---------------------------------------------------------------------------
 # Docs

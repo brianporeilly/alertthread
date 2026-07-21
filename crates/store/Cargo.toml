@@ -10,15 +10,46 @@ homepage.workspace = true
 authors.workspace = true
 
 [features]
-# Backend selection (ROADMAP Phase 2). Declared now, empty, so `just test-pg`
-# and the CI matrix resolve against real feature names rather than being
-# retrofitted later. Phase 2 attaches the sqlx drivers and migrations to them.
+# Backend selection (ADR 001 D4). SQLite is the default because it is the
+# zero-dependency deployment; PostgreSQL is opt-in and is what makes more than
+# one replica legal.
+#
+# The two are *separable on purpose*, and not only to keep the binary small.
+# `just test` runs the coverage gate with no containers available, so the
+# PostgreSQL conformance suite cannot run there. Compiling `PostgresStore` into
+# that build would count its lines as uncovered and drag this crate under its
+# 95% threshold — so the honest arrangement is that each gated build compiles
+# exactly the backend it can exercise:
+#
+#   just test     --workspace, default features      -> sqlite only, gated
+#   just test-pg  --no-default-features -F postgres  -> postgres only, gated
+#
+# Neither backend ends up unmeasured, and neither is measured against tests that
+# cannot run. See the `--profile store-postgres` mode of scripts/coverage-gate.py.
+#
+# `sqlite-bundled` rather than sqlx's umbrella `sqlite` feature: the umbrella
+# also turns on `load-extension`, which links `dlopen`. Loading arbitrary
+# extensions is not a capability an alerting relay wants, and the release build
+# is a static musl binary on `scratch` where `dlopen` cannot work anyway.
 default = ["sqlite"]
-sqlite = []
-postgres = []
+sqlite = ["sqlx/sqlite-bundled"]
+postgres = ["sqlx/postgres"]
 
 [dependencies]
 alertthread-core.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# `macros` for `sqlx::migrate!` and `#[sqlx::test]`; `migrate` for the migrator
+# itself. Neither backend driver is enabled here — see [features] above.
+sqlx = { workspace = true, features = ["macros", "migrate"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+# The conformance suite races N tasks against one fingerprint (ADR 001 D3), so
+# it needs to spawn them and synchronise them on a barrier. `#[sqlx::test]`
+# brings its own current-thread runtime; these are the pieces it does not.
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }
 
 [lints]
 workspace = true

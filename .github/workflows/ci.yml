@@ -61,24 +61,37 @@ jobs:
           if-no-files-found: warn
 
   test-pg:
-    name: postgres conformance
+    name: postgres conformance + coverage gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - uses: extractions/setup-just@v3
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest
+          tool: cargo-nextest,cargo-llvm-cov
       # The dev stack comes up through the same recipe developers use, on whichever
       # engine the runner has. `just up` detects podman or docker rather than
       # hardcoding either, which is the only reason this job works on a Docker-only
       # GitHub runner without a second code path to keep in sync.
       - run: just up
+      # `just test-pg` runs the PostgreSQL half of the store's coverage gate. The
+      # `test` job above compiles the SQLite backend only — see
+      # scripts/coverage-gate.py — so this job is not an extra check on the same
+      # code, it is the only place PostgresStore is measured at all.
       - run: just test-pg
       - if: always()
         run: just down
+      - name: Upload PostgreSQL coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-json-postgres
+          path: coverage/llvm-cov-postgres.json
+          if-no-files-found: warn
 
   deny:
     name: cargo-deny

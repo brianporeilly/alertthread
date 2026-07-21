@@ -39,3 +39,32 @@ jobs:
           name: mutants-out
           path: mutants.out/
           if-no-files-found: warn
+
+  # The other half of the sweep. `just mutants` builds with default features, so
+  # `crates/store/src/postgres.rs` is not compiled and is excluded there — a
+  # mutant in code the build does not contain survives every test by
+  # construction. This job is where the PostgreSQL backend is actually mutated,
+  # and it is the same split the coverage gate uses for the same reason.
+  mutants-pg:
+    name: cargo-mutants (postgres backend)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v3
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants,cargo-nextest
+      - run: just up
+      - run: just mutants-pg
+      - if: always()
+        run: just down
+      - name: Upload mutants report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-out-postgres
+          path: mutants.out/
+          if-no-files-found: warn
