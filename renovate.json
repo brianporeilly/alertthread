@@ -1,0 +1,68 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommits"
+  ],
+  "timezone": "Europe/Dublin",
+  "schedule": ["before 6am on monday"],
+  "prConcurrentLimit": 5,
+  "commitMessagePrefix": "chore(deps): ",
+  "labels": ["dependencies"],
+  "rangeStrategy": "bump",
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on the first day of the month"]
+  },
+  "packageRules": [
+    {
+      "description": "Group all non-major Rust dependency bumps into one PR. Individually they are noise; together they are one CI run and one review.",
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "rust dependencies (non-major)"
+    },
+    {
+      "description": "sqlx dictates the MSRV. A major bump can move the toolchain floor and change the SqlSafeStr API, so it is never grouped and never automerged.",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["sqlx", "libsqlite3-sys"],
+      "matchUpdateTypes": ["major", "minor"],
+      "groupName": null,
+      "automerge": false,
+      "labels": ["dependencies", "msrv-risk"],
+      "addLabels": ["needs-manual-review"]
+    },
+    {
+      "description": "The Rust toolchain and the Alpine build base both affect the static musl build validated in Phase 0. Bump them deliberately, together, and re-check the image builds.",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["docker.io/library/rust", "docker.io/library/alpine"],
+      "groupName": "build toolchain images",
+      "automerge": false
+    },
+    {
+      "description": "GitHub Actions bumps are low-risk and high-volume; group and automerge patch/minor once CI is green.",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "github actions",
+      "automerge": true
+    },
+    {
+      "description": "Pin GitHub Actions to commit SHAs. A mutable tag on a third-party action is arbitrary code execution in a workflow that holds registry credentials.",
+      "matchManagers": ["github-actions"],
+      "pinDigests": true
+    },
+    {
+      "description": "Never silently jump a major version of anything in the delivery path.",
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["major"],
+      "automerge": false,
+      "addLabels": ["breaking-change-risk"]
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": ["security"],
+    "schedule": ["at any time"]
+  },
+  "osvVulnerabilityAlerts": true
+}

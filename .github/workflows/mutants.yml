@@ -1,0 +1,41 @@
+name: Mutation testing
+
+# Mutation runs are slow, so they are nightly rather than in the PR path.
+# `just mutants` is required locally for any change to alertthread-core; this
+# job is the workspace-wide sweep.
+#
+# Coverage proves a line ran. It does not prove a test would have caught the
+# regression, and for a system whose worst failure mode is silence, "would we
+# have noticed?" is the only question worth asking.
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  mutants:
+    name: cargo-mutants
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v3
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants,cargo-nextest
+      - run: just mutants
+      - name: Upload mutants report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-out
+          path: mutants.out/
+          if-no-files-found: warn

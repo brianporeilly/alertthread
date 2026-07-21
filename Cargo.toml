@@ -15,9 +15,11 @@ authors = ["alertthread contributors"]
 # Several are newer than they may appear from memory — check before assuming an API.
 # Crates declare what they need from here; the workspace owns the version.
 [workspace.dependencies]
-alertthread-core = { path = "crates/core" }
-alertthread-slack = { path = "crates/slack" }
-alertthread-store = { path = "crates/store" }
+# `version` alongside `path` is required for these to be publishable later, and
+# cargo-deny cannot resolve a path-only workspace dependency without it.
+alertthread-core = { path = "crates/core", version = "0.0.0" }
+alertthread-slack = { path = "crates/slack", version = "0.0.0" }
+alertthread-store = { path = "crates/store", version = "0.0.0" }
 
 anyhow = "1.0"
 axum = "0.8"
