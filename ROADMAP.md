@@ -385,8 +385,10 @@ a `/still-firing` slash command.
    instead is a stronger guarantee — no rendering path *can* panic, enforced by the workspace
    lint denials — but it is not what D9 describes. Reword D9, or accept the divergence
    explicitly.
-5. **One pre-existing surviving mutant**, `crates/store/src/sqlite.rs:478`. Judged equivalent
-   on that backend; recorded so it is not rediscovered as new.
+5. **One pre-existing surviving mutant**, `replace > with >= in persist_group`, currently
+   `crates/store/src/sqlite.rs:488`. Judged equivalent on that backend; recorded so it is
+   not rediscovered as new. Cite it by name as well as by line — the line moves whenever
+   the function above it does.
 6. **ADR 003 should collect the Phase 3–4 gaps** once Phase 4 lands, the way ADR 002 batched
    Phases 1–2. Deliberately batched: one ADR per finding would make the numbering noise
    rather than signal. Items 4, 5 and 7 above are candidates, along with the eight decisions
@@ -410,3 +412,11 @@ a `/still-firing` slash command.
   The line was covered; the assertion just did not care.
 - **Phases ending in working code find things re-reading documents does not.** Every gap in
   ADR 002 was found by implementing the case, not by review.
+- **Amending a migration invalidates more local state than the compose volume.** sqlx
+  checksums migrations, so editing `0001_initial.sql` before release — which is the agreed
+  way to change the schema while nothing is released — fails every database an earlier run
+  left behind. `just down` clears the PostgreSQL volume, but the SQLite files the wiring
+  tests kept under `CARGO_TARGET_TMPDIR` survived it and broke `just ci` on a tree that was
+  otherwise correct. Tests that persist a database now delete it first. Worth re-checking
+  the next time a migration is amended: the failure names `VersionMismatch` and points at
+  the migration, not at the stale file.
