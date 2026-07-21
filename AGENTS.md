@@ -141,7 +141,24 @@ merged until it appears in `reference/configuration.md`. A new metric is not mer
 it appears in `reference/metrics.md`. State in the PR description which quadrant you
 touched and why.
 
-ADRs live in `docs/src/adr/` and are append-only — supersede, never rewrite.
+### ADRs
+
+ADRs live in `docs/src/adr/`. "Append-only" protects **decisions**, not every character:
+
+- **Decisions, rationale, alternatives, consequences — never rewritten.** Changed your mind?
+  Write a new ADR that supersedes the old one. A reader must be able to see what was decided
+  *then*, not a tidied version.
+- **Factual drift — corrected in place.** Renames, moved paths, broken links, typos. Record
+  it in the ADR's **Amendments** section: what changed, and why it was not a decision.
+
+The test is not "is this obviously wrong?" — everyone thinks their edit obviously qualifies,
+and that is how the convention erodes. The test is: **was this string ever decided?** ADR 001
+never decided the metric prefix should be `sturdy_telegram_`; it recorded the name as
+provisional and expected the rename. Correcting those was completing a decision, not
+reversing one. Contrast D12's naming rationale, which *was* the decision and is preserved
+verbatim with a resolution note appended.
+
+If you cannot tell which side something falls on, it is a decision. Supersede it.
 
 ---
 
