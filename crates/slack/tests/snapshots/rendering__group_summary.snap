@@ -1,0 +1,22 @@
+---
+source: crates/slack/tests/rendering.rs
+expression: snapshot_of(&rendered)
+---
+{
+  "attachments": [
+    {
+      "blocks": [
+        {
+          "text": {
+            "text": "*:rotating_light: FIRING · 9 of 15 alerts* · KubePodNotReady\n\n_6 already resolved_\n\n_Alertmanager group_ `{}/{severity=\"critical\"}:{alertname=\"KubePodNotReady\", job=\"kube-state-metrics\"}`\n_Each alert is threaded under this message and updated there as it resolves._",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        }
+      ],
+      "color": "#d40e0d",
+      "fallback": ":rotating_light: FIRING · 9 of 15 alerts · KubePodNotReady"
+    }
+  ],
+  "text": ":rotating_light: FIRING · 9 of 15 alerts · KubePodNotReady"
+}

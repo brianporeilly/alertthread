@@ -1,0 +1,22 @@
+---
+source: crates/slack/tests/rendering.rs
+expression: snapshot_of(&rendered)
+---
+{
+  "attachments": [
+    {
+      "blocks": [
+        {
+          "text": {
+            "text": "*:rotating_light: FIRING · CephOSDDown* · `critical`\nCeph OSD osd.3 is down\nOSD osd.3 on ceph-node-2 has been marked down for more than 5 minutes.\n`instance=ceph-node-2` `job=rook-ceph-mgr` `osd=osd.3`\n\n_firing since 2026-07-21 14:02:00 UTC · 29m 0s_ · <https://runbooks.example/ceph/osd-down|runbook> · <https://prometheus.example/graph?g0.expr=ceph_osd_up==0&amp;g0.tab=1|source>",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        }
+      ],
+      "color": "#d40e0d",
+      "fallback": ":rotating_light: FIRING · CephOSDDown · critical"
+    }
+  ],
+  "text": ":rotating_light: FIRING · CephOSDDown · critical"
+}

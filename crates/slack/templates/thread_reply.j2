@@ -1,0 +1,8 @@
+{#-
+  Built-in `thread_reply` template (ADR 001 D6, D10).
+
+  `chat.update` does not notify, bump, or mark a channel unread, so an in-place edit
+  alone is invisible to anyone watching live. This reply is what generates the unread
+  indicator — which is why it is short: its job is to be noticed, not to be read.
+-#}
+:white_check_mark: *Resolved* after {{ alert.duration }} — {{ alert.resolved_at }}

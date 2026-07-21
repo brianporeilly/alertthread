@@ -1,0 +1,22 @@
+---
+source: crates/slack/tests/rendering.rs
+expression: snapshot_of(&rendered)
+---
+{
+  "attachments": [
+    {
+      "blocks": [
+        {
+          "text": {
+            "text": "*:rotating_light: FIRING · CephOSDDown* · `critical`\n&lt;!channel&gt; disk &gt; 90% &amp; climbing — see &lt;https://evil.example|here&gt;\n`instance=ceph-node-2` `job=rook-ceph-mgr` `osd=osd.3`\n\n_firing since 2026-07-21 14:02:00 UTC · 1m 0s_ · <https://prometheus.example/graph?g0.expr=ceph_osd_up==0&amp;g0.tab=1|source>",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        }
+      ],
+      "color": "#d40e0d",
+      "fallback": ":rotating_light: FIRING · CephOSDDown · critical"
+    }
+  ],
+  "text": ":rotating_light: FIRING · CephOSDDown · critical"
+}

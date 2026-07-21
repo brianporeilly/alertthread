@@ -1,0 +1,20 @@
+{#-
+  Built-in `group_summary` template (ADR 001 D5, D10).
+
+  The storm-collapse parent. Individual alerts are threaded underneath it and each keeps
+  its own message, so per-alert resolve still edits the right child; only the visual
+  placement changes.
+
+  Receives one variable, `group`. Note that `group.alertname` is read out of
+  Alertmanager's group key and may be empty.
+-#}
+{% if group.all_resolved -%}
+*:white_check_mark: RESOLVED · {{ group.total }} alerts*{% if group.alertname %} · {{ group.alertname }}{% endif %}
+{% else -%}
+*:rotating_light: FIRING · {{ group.firing }} of {{ group.total }} alerts*{% if group.alertname %} · {{ group.alertname }}{% endif %}
+{% endif %}
+{%- if group.resolved and not group.all_resolved %}
+_{{ group.resolved }} already resolved_
+{% endif %}
+_Alertmanager group_ `{{ group.group_key }}`
+_Each alert is threaded under this message and updated there as it resolves._

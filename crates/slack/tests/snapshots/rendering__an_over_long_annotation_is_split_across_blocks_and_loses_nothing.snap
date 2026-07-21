@@ -1,0 +1,9 @@
+---
+source: crates/slack/tests/rendering.rs
+expression: shape
+---
+[
+  "section(3000 chars)",
+  "section(3000 chars)",
+  "section(1436 chars)"
+]

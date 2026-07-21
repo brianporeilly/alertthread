@@ -38,9 +38,19 @@
 //! API designed hardest.
 
 mod error;
+mod message;
+mod render;
 mod token;
 
 pub use error::{Disposition, SlackError, SlackMethod};
+pub use message::{
+    Attachment, Block, Colour, MAX_BLOCKS, MAX_NOTIFICATION_CHARS, MAX_SECTION_CHARS, MessageBody,
+    Text,
+};
+pub use render::{
+    AlertView, Degradation, FallbackReason, GroupView, RejectedOverride, RenderRequest, Rendered,
+    Renderer, TemplateKind, Truncation,
+};
 pub use token::SlackToken;
 
 /// The version of this crate, as recorded in its `Cargo.toml`.
