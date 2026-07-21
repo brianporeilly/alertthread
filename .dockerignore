@@ -1,0 +1,10 @@
+target/
+docs/book/
+coverage/
+mutants.out/
+mutants.out.old/
+.git/
+.github/
+*.db
+*.db-shm
+*.db-wal

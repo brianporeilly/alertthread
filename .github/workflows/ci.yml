@@ -1,0 +1,149 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  merge_group:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: -D warnings
+
+permissions:
+  contents: read
+
+jobs:
+  # Every job below invokes a `just` recipe rather than reimplementing the
+  # command. That equivalence is the point: AGENTS.md promises "CI runs these
+  # same recipes, so if it passes locally it passes in CI", and spelling the
+  # cargo flags out again here is exactly how that promise rots.
+  lint:
+    name: fmt + clippy + dependency direction
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v3
+      - run: just lint
+
+  test:
+    name: tests + coverage gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v3
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,cargo-llvm-cov
+      # Runs the per-crate thresholds. This is the job that must be seen to
+      # fail when coverage drops — a threshold nobody has watched reject
+      # anything is not a gate.
+      - run: just test
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-json
+          path: coverage/llvm-cov.json
+          if-no-files-found: warn
+
+  test-pg:
+    name: postgres conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v3
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      # test too.
+      - run: just up
+      - run: just test-pg
+      - if: always()
+        run: just down
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - run: cargo deny check
+
+  msrv:
+    name: MSRV 1.94
+    runs-on: ubuntu-latest
+    env:
+      # rust-toolchain.toml pins the *build* toolchain and takes precedence over
+      # `rustup override`, so installing 1.94 alone would silently still compile
+      # with the pinned version and this job would prove nothing. RUSTUP_TOOLCHAIN
+      # is one of the few things that outranks the file.
+      RUSTUP_TOOLCHAIN: "1.94.0"
+    steps:
+      - uses: actions/checkout@v5
+      # Pinned to the exact floor rather than `stable`. MSRV is dictated by
+      # sqlx 0.9, not chosen, so this job exists to catch accidental use of a
+      # newer language feature — which `stable` would happily compile.
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Confirm the MSRV toolchain is the one actually in use
+        run: |
+          rustc --version
+          rustc --version | grep -q '1\.94\.' || {
+            echo "MSRV job is not running on 1.94 — rust-toolchain.toml is winning." >&2
+            exit 1
+          }
+      - run: cargo check --workspace --all-targets
+
+  docs:
+    name: mdbook + link check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: extractions/setup-just@v3
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: mdbook
+      - run: just docs
+
+  image:
+    name: scratch image builds and runs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: extractions/setup-just@v3
+      # Built through the same recipe developers use, on whichever engine the
+      # runner has. The rationale for building it on every PR is in the recipe.
+      - run: just image localhost/alertthread:ci
+
+  # Single required status check, so branch protection does not need updating
+  # every time a job is added.
+  ci-success:
+    name: CI
+    if: always()
+    needs: [lint, test, test-pg, deny, msrv, docs, image]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any job failed
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
+      - run: echo "All CI jobs passed."

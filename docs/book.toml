@@ -1,0 +1,21 @@
+[book]
+title = "alertthread"
+description = "Alertmanager to Slack relay with fingerprint-keyed threading and update-on-resolve"
+authors = ["alertthread contributors"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+# A link into a page that does not exist is a docs bug, and docs ship with the
+# change. Fail the build rather than publishing a dead link.
+create-missing = false
+
+[output.html]
+default-theme = "rust"
+git-repository-url = "https://github.com/brianporeilly/alertthread"
+edit-url-template = "https://github.com/brianporeilly/alertthread/edit/main/docs/{path}"
+
+[output.html.fold]
+enable = true
+level = 1

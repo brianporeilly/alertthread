@@ -1,0 +1,72 @@
+# Local development stack.
+#
+# Started and stopped with `just up` / `just down`, which detect podman or
+# docker and use whichever is installed. Nothing in this file is specific to
+# either engine; keep it that way.
+#
+# ⚠️ SELinux, on Fedora. This file uses a *named volume* for PostgreSQL data
+# rather than a bind mount, which sidesteps relabelling entirely — podman
+# manages the volume's context itself.
+#
+# That is deliberate, and the constraint still applies the moment anyone adds a
+# bind mount here (Phase 3 will, for template overrides). Any `- ./host:/path`
+# entry MUST carry `:z` or `:Z`, or the container gets permission denied for
+# reasons that look nothing like SELinux:
+#
+#     - ./templates:/etc/alertthread/templates:z
+#
+# `:z` relabels shared, for content more than one container may read. `:Z`
+# relabels private and will break any other consumer of the same directory.
+
+name: alertthread
+
+services:
+  # PostgreSQL is opt-in for the relay (SQLite is the default) but the store
+  # conformance suite runs against both, so it is always part of the dev stack.
+  postgres:
+    image: docker.io/library/postgres:17-alpine
+    environment:
+      POSTGRES_USER: alertthread
+      POSTGRES_PASSWORD: alertthread
+      POSTGRES_DB: alertthread
+      # The dev database is thrown away constantly; durability costs more than
+      # it buys here. Never do this anywhere real.
+      PGDATA: /var/lib/postgresql/data/pgdata
+    command:
+      - postgres
+      - -c
+      - fsync=off
+      - -c
+      - synchronous_commit=off
+      - -c
+      - full_page_writes=off
+      # #[sqlx::test] creates an isolated database per test and they run in
+      # parallel, so the default of 100 is reachable.
+      - -c
+      - max_connections=200
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U alertthread -d alertthread"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  # Fake Slack. Phase 0 ships a stub; Phase 4 grows it into a web UI that
+  # renders messages *and threads*, which is what makes the end-to-end
+  # threading behaviour visible without a real Slack workspace.
+  slack-mock:
+    build:
+      context: .
+      dockerfile: dev/slack-mock/Containerfile
+    image: localhost/alertthread-slack-mock:dev
+    ports:
+      - "8081:8081"
+    environment:
+      RUST_LOG: info
+
+volumes:
+  postgres-data:

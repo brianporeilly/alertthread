@@ -1,0 +1,83 @@
+# cargo-deny: licences, advisories, and a second line of defence on the
+# dependency direction.
+#
+# Run by `just ci`. See https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+targets = [
+    { triple = "x86_64-unknown-linux-musl" },
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-musl" },
+]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+# Advisories with no patched version available yet are still worth failing on:
+# this sits in the alerting path, and "we knew but had nowhere to go" is a
+# decision to record explicitly in this file, not to default into.
+ignore = []
+
+[licenses]
+version = 2
+# The project is MIT OR Apache-2.0 (ADR 001 D12). Dependencies must be
+# compatible with both halves of that, which rules out anything copyleft.
+confidence-threshold = 0.9
+# The allow-list is the full permissive set we are willing to accept, declared
+# up front rather than grown one dependency at a time. Until the real
+# dependencies land most entries match nothing, and warning about that is pure
+# noise — the list is a policy, not an inventory.
+unused-allowed-license = "allow"
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+[[licenses.exceptions]]
+# ring's licence is a bespoke combination covering its OpenSSL-derived
+# assembly. Widely used, reviewed repeatedly across the ecosystem, and it
+# arrives through rustls.
+name = "ring"
+allow = ["OpenSSL"]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# The workspace's own crates are path dependencies with no version, which reads
+# as a wildcard. Denying wildcards is about unpinned *registry* crates; our own
+# members are pinned by being in the tree.
+allow-wildcard-paths = true
+# Documented in AGENTS.md as a settled decision: chrono, not jiff, throughout.
+# Timestamps cross the core/store boundary constantly and sqlx has first-class
+# chrono support; two time types in one codebase is a reliable source of
+# off-by-a-timezone bugs.
+deny = [
+    { name = "jiff", reason = "chrono is the project's only time type — see AGENTS.md footguns" },
+    { name = "time", reason = "chrono is the project's only time type — see AGENTS.md footguns" },
+    { name = "openssl", reason = "rustls only; openssl breaks the static musl build" },
+    { name = "openssl-sys", reason = "rustls only; openssl breaks the static musl build" },
+    # We call exactly three Slack endpoints. "An SDK is not warranted" is a
+    # decision already made (ADR 001 D1); this stops it drifting back.
+    { name = "slack-morphism", reason = "hand-rolled reqwest client by decision — ADR 001 D1" },
+    # testcontainers needs a docker socket and its Ryuk reaper misbehaves under
+    # rootless podman. #[sqlx::test] is the supported path.
+    { name = "testcontainers", reason = "no docker socket; use #[sqlx::test] — see AGENTS.md" },
+]
+skip = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

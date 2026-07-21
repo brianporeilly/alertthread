@@ -1,0 +1,23 @@
+[package]
+name = "alertthread-core"
+description = "Pure decision logic for the alertthread Alertmanager-to-Slack relay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+# ---------------------------------------------------------------------------
+# THIS CRATE IS PURE. It must not depend on tokio, sqlx, axum or reqwest, and
+# must perform no I/O: no filesystem, no network, no clock reads, no RNG.
+# Time enters as a `now: DateTime<Utc>` parameter.
+#
+# This is not a convention — `just check-deps` fails the build if it is
+# violated, and CI runs that recipe. See scripts/check-deps.sh.
+# ---------------------------------------------------------------------------
+[dependencies]
+
+[lints]
+workspace = true

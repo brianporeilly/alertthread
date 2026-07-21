@@ -15,9 +15,9 @@ merge.
 
 | Document | What it is |
 |---|---|
-| [`docs/001-adr.md`](docs/001-adr.md) | The architecture. Decisions D1–D12 are settled |
+| [`docs/src/adr/001-adr.md`](docs/src/adr/001-adr.md) | The architecture. Decisions D1–D12 are settled |
 | [`ROADMAP.md`](ROADMAP.md) | Phases, pinned versions, settled choices |
-| [`docs/000-prd.md`](docs/000-prd.md) | Problem statement and prior research |
+| [`docs/src/adr/000-prd.md`](docs/src/adr/000-prd.md) | Problem statement and prior research |
 
 **Do not re-litigate settled decisions.** Rust over Go, outbox over synchronous posting,
 SQLite-default with Postgres-optional, per-fingerprint with storm-collapse — all decided,
@@ -141,7 +141,24 @@ merged until it appears in `reference/configuration.md`. A new metric is not mer
 it appears in `reference/metrics.md`. State in the PR description which quadrant you
 touched and why.
 
-ADRs live in `docs/src/adr/` and are append-only — supersede, never rewrite.
+### ADRs
+
+ADRs live in `docs/src/adr/`. "Append-only" protects **decisions**, not every character:
+
+- **Decisions, rationale, alternatives, consequences — never rewritten.** Changed your mind?
+  Write a new ADR that supersedes the old one. A reader must be able to see what was decided
+  *then*, not a tidied version.
+- **Factual drift — corrected in place.** Renames, moved paths, broken links, typos. Record
+  it in the ADR's **Amendments** section: what changed, and why it was not a decision.
+
+The test is not "is this obviously wrong?" — everyone thinks their edit obviously qualifies,
+and that is how the convention erodes. The test is: **was this string ever decided?** ADR 001
+never decided the metric prefix should be `sturdy_telegram_`; it recorded the name as
+provisional and expected the rename. Correcting those was completing a decision, not
+reversing one. Contrast D12's naming rationale, which *was* the decision and is preserved
+verbatim with a resolution note appended.
+
+If you cannot tell which side something falls on, it is a decision. Supersede it.
 
 ---
 
@@ -159,7 +176,7 @@ just test-pg    # postgres conformance (needs `just up`)
 just coverage   # report only, no gate — for finding the gaps
 just mutants    # mutation testing; required for core changes
 just docs       # mdbook build + link check
-just up/down    # podman compose dev stack
+just up/down    # compose dev stack (podman or docker, auto-detected)
 just ci         # everything CI runs, including the coverage gate
 ```
 
@@ -178,7 +195,12 @@ Real ones, discovered the hard way. Each has cost somebody time.
 - **MSRV is 1.94**, dictated by `sqlx` 0.9, not chosen. Do not use newer language features
   without raising it deliberately.
 - **SELinux, on Fedora.** Bind mounts in `compose.yaml` need `:z` or `:Z`, or the container
-  gets permission denied for reasons that look nothing like SELinux.
+  gets permission denied for reasons that look nothing like SELinux. Docker users will not
+  reproduce this, which is exactly why it is easy to break for everyone else.
+- **The container engine is detected, not assumed.** `just` picks podman or docker,
+  whichever is installed. Never hardcode either one in a recipe, a workflow, or
+  `compose.yaml` — use `{{ engine }}` / `{{ compose }}`. CI relies on this to run the same
+  recipes on a Docker-only runner.
 - **`chrono`, not `jiff`**, throughout — deliberate, for `sqlx` compatibility. Do not
   introduce a second time type.
 - **Slack allows ~1 `chat.postMessage` per second per channel**, thread replies included.
