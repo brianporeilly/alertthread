@@ -71,7 +71,10 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      # test too.
+      # The dev stack comes up through the same recipe developers use, on whichever
+      # engine the runner has. `just up` detects podman or docker rather than
+      # hardcoding either, which is the only reason this job works on a Docker-only
+      # GitHub runner without a second code path to keep in sync.
       - run: just up
       - run: just test-pg
       - if: always()
