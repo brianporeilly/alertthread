@@ -109,7 +109,9 @@ check-links:
 
 # Start the podman compose dev stack (postgres + slack-mock).
 up:
-    podman compose up -d
+    # --build so a changed slack-mock does not silently run as a stale image.
+    # Layer caching makes the no-op case cheap.
+    podman compose up -d --build
     @echo "Waiting for PostgreSQL..."
     @timeout 60 bash -c 'until podman compose exec -T postgres pg_isready -U alertthread >/dev/null 2>&1; do sleep 1; done'
     @echo "Dev stack up."

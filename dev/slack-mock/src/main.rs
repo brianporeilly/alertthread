@@ -10,4 +10,10 @@
 
 fn main() {
     println!("slack-mock stub: Phase 0 placeholder, no HTTP server yet.");
+
+    // Park rather than exit. A compose service that exits immediately shows as
+    // `Exited` in `podman compose ps`, which makes `just up` claim success over
+    // a stack that is half down — a confusing thing to hand a newcomer. Once
+    // Phase 4 puts a real server here this is replaced by the accept loop.
+    std::thread::park();
 }

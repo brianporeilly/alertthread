@@ -17,9 +17,15 @@ distroless-glibc and `rusqlite` alternatives listed as contingencies were not us
 
 | Build | Binary | `scratch` image |
 |---|---|---|
+| Phase 0 as it stands today (no dependencies yet) | 381 KB | 570 KB |
 | `sqlx` + bundled SQLite only | 1.78 MB | 1.78 MB |
 | Full projected dependency set | 5.84 MB | 5.84 MB |
 | Full set + CA certificates | 5.84 MB | **6.02 MB** |
+
+The first row is what this repository actually produces right now and is not a useful
+prediction — the Phase 0 crates have no dependencies. **6.02 MB is the number to compare
+against the ADR**, because it is the one measured with everything ADR 001 commits to
+actually linked in.
 
 The "full projected dependency set" is every crate ADR 001 D1 commits to — `sqlx` with both
 the `sqlite` and `postgres` drivers, `axum`, `tower-http`, `reqwest` with rustls, `minijinja`,

@@ -1,0 +1,21 @@
+# Dev-only image for the fake Slack. Not shipped, not published.
+#
+# Kept deliberately simple: this is not the release Dockerfile and does not
+# need cargo-chef or a scratch runtime. It exists so `just up` has something
+# to start.
+
+FROM docker.io/library/rust:1.97.1-alpine3.22 AS builder
+
+RUN apk add --no-cache musl-dev
+
+WORKDIR /build
+COPY . .
+RUN cargo build --release --package slack-mock --bin slack-mock \
+    && cp target/release/slack-mock /build/slack-mock-bin
+
+FROM docker.io/library/alpine:3.22 AS runtime
+
+COPY --from=builder /build/slack-mock-bin /usr/local/bin/slack-mock
+
+EXPOSE 8081
+ENTRYPOINT ["/usr/local/bin/slack-mock"]
