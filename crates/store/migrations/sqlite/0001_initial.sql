@@ -44,6 +44,10 @@ CREATE TABLE group_message (
     channel      TEXT    NOT NULL,
     message_ts   TEXT,
     member_count INTEGER NOT NULL DEFAULT 0,
+    -- JSONB in the PostgreSQL dialect; TEXT here, per the JSONB -> TEXT note
+    -- at the top of this file. Read the PostgreSQL migration for what the
+    -- column is for and why it is written once.
+    group_labels TEXT    NOT NULL,
     created_at   TEXT    NOT NULL,
     PRIMARY KEY (group_key, channel)
 );

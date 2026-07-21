@@ -22,7 +22,7 @@ use std::str::FromStr;
 
 use alertthread_core::{
     AlertBatch, ChannelId, ClaimOutcome, ClaimResult, Fingerprint, GroupKey, GroupState, Intent,
-    MessageTs, Op, Placement, Plan, ThreadTs, WebhookAlert,
+    LabelMap, MessageTs, Op, Placement, Plan, ThreadTs, WebhookAlert,
 };
 use chrono::{DateTime, TimeDelta, Utc};
 use sqlx::pool::PoolOptions;
@@ -90,14 +90,17 @@ SELECT fingerprint, channel, state, message_ts, thread_parent_ts, group_key,
 FROM alert_message WHERE fingerprint = $1 AND channel = $2";
 
 const SELECT_GROUP: &str = "\
-SELECT group_key, channel, message_ts, member_count, created_at
+SELECT group_key, channel, message_ts, member_count, group_labels, created_at
 FROM group_message WHERE group_key = $1 AND channel = $2";
 
 const INSERT_GROUP: &str = "\
-INSERT INTO group_message (group_key, channel, message_ts, member_count, created_at)
-VALUES ($1, $2, NULL, $3, $4)
+INSERT INTO group_message
+    (group_key, channel, message_ts, member_count, group_labels, created_at)
+VALUES ($1, $2, NULL, $3, $4, $5)
 ON CONFLICT (group_key, channel) DO NOTHING";
 
+/// A later batch joining an existing group. `group_labels` is *not* in the SET list: see
+/// `persist_group`.
 const JOIN_GROUP: &str = "\
 UPDATE group_message SET member_count = member_count + $1 WHERE group_key = $2 AND channel = $3";
 
@@ -385,10 +388,13 @@ async fn mark_resolving(
 // Persistence of a plan
 // ---------------------------------------------------------------------------
 
+/// See the SQLite backend's `persist_group` for why the return value matters under HA, and
+/// why `group_labels` is bound on the insert and never on the join.
 async fn persist_group(
     conn: &mut PgConnection,
     delta: &GroupDelta<'_>,
     channel: &ChannelId,
+    group_labels: &LabelMap,
     now: DateTime<Utc>,
 ) -> Result<bool, StoreError> {
     let Some(group_key) = delta.group else {
@@ -400,6 +406,7 @@ async fn persist_group(
             .bind(group_key.as_str())
             .bind(channel.as_str())
             .bind(delta.members)
+            .bind(Json(group_labels))
             .bind(now)
             .execute(&mut *conn)
             .await?;
@@ -472,7 +479,8 @@ impl StateStore for PostgresStore {
         let plan = decide(&outcomes, group.as_ref().map(GroupRecord::state).as_ref());
 
         let delta = GroupDelta::of(&plan.ops);
-        let opened = persist_group(&mut txn, &delta, &batch.channel, now).await?;
+        let opened =
+            persist_group(&mut txn, &delta, &batch.channel, &batch.group_labels, now).await?;
 
         let mut persisted = Vec::with_capacity(plan.ops.len());
         for op in plan.ops {

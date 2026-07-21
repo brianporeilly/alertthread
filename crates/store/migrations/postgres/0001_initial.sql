@@ -44,6 +44,17 @@ CREATE TABLE group_message (
     channel      TEXT        NOT NULL,
     message_ts   TEXT,
     member_count INTEGER     NOT NULL DEFAULT 0,
+    -- Alertmanager's `groupLabels`: the labels its `group_by` grouped on.
+    -- Written once, when the group is opened, and never updated — they are
+    -- what *defines* the group and cannot change while it exists, because
+    -- changing `group_by` changes the group key and so produces a different
+    -- row. Without this column a summary has only the group key to name
+    -- itself by, and the key's format is Alertmanager's business, not an API.
+    --
+    -- `commonLabels`/`commonAnnotations` are deliberately not here: they are
+    -- recomputed per delivery from current membership, so a written-once copy
+    -- goes stale, and a stale annotation is worse than an absent one.
+    group_labels JSONB       NOT NULL,
     created_at   TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (group_key, channel)
 );

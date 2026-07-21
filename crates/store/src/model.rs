@@ -155,6 +155,17 @@ pub struct GroupRecord {
     /// class of divergence the conformance suite exists to prevent — so the narrower type
     /// is the honest one.
     pub member_count: i32,
+    /// Alertmanager's `groupLabels` for this group: what its `group_by` grouped on.
+    ///
+    /// Written when the group is opened and never updated. These labels *define* the
+    /// group — changing `group_by` changes the group key and therefore produces a different
+    /// row — so unlike `commonLabels` they cannot drift while the group exists, which is
+    /// what makes write-once correct rather than merely convenient.
+    ///
+    /// They live on the row rather than on the op because the row is the only thing with
+    /// the group's lifetime: `RefreshGroup` is planned later, when a child resolves, and
+    /// ADR 001 D4 deletes an outbox row on completion.
+    pub group_labels: LabelMap,
     /// When the group was opened.
     pub created_at: DateTime<Utc>,
 }
@@ -418,6 +429,9 @@ mod tests {
             channel: ChannelId::new("#alerts"),
             message_ts: Some(ThreadTs::new("1.2")),
             member_count: 9,
+            group_labels: [("alertname".to_owned(), "KubePodNotReady".to_owned())]
+                .into_iter()
+                .collect(),
             created_at: DateTime::<Utc>::from_timestamp(1_721_500_000, 0)
                 .expect("timestamp is in range"),
         };
@@ -425,6 +439,12 @@ mod tests {
 
         assert_eq!(state.group_key, GroupKey::new("gk"));
         assert_eq!(state.message_ts, Some(ThreadTs::new("1.2")));
+        // The labels are presentation, not placement: `plan` has no use for them, so
+        // narrowing to `GroupState` deliberately leaves them behind.
+        assert_eq!(
+            record.group_labels.get("alertname").map(String::as_str),
+            Some("KubePodNotReady")
+        );
     }
 
     #[test]

@@ -140,6 +140,9 @@ conformance!(
     // ADR 001 D5 — storm collapse.
     a_batch_above_the_threshold_opens_a_group_and_threads_its_children,
     a_late_alert_sticks_to_a_group_that_already_exists,
+    a_groups_labels_are_stored_when_it_is_opened,
+    a_group_opened_with_no_group_labels_stores_an_empty_map,
+    a_later_batch_joining_a_group_does_not_rewrite_its_labels,
     resolving_a_collapsed_child_edits_the_childs_own_message,
     // ADR 001 D2 — the worker lease, and D3's crash rows.
     work_is_handed_to_one_worker_at_a_time,
