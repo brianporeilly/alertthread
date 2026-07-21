@@ -312,6 +312,7 @@ mod tests {
         AlertBatch {
             channel: channel(),
             group_key: group_key(),
+            group_labels: LabelMap::new(),
             truncated_alerts: 0,
             alerts: outcomes.iter().map(|o| o.alert.clone()).collect(),
         }
@@ -1157,6 +1158,7 @@ mod tests {
         let batch = AlertBatch {
             channel: channel(),
             group_key: group_key(),
+            group_labels: LabelMap::new(),
             truncated_alerts: 0,
             alerts: Vec::new(),
         };
@@ -1173,6 +1175,7 @@ mod tests {
         let batch = AlertBatch {
             channel: channel(),
             group_key: group_key(),
+            group_labels: LabelMap::new(),
             truncated_alerts: 4,
             alerts: Vec::new(),
         };
