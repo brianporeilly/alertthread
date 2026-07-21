@@ -1,0 +1,9 @@
+[toolchain]
+# MSRV is 1.94, dictated by sqlx 0.9 — not chosen. See AGENTS.md "Footguns".
+# This pin is the *build* toolchain; the MSRV floor is asserted separately by the
+# `msrv` CI job, which builds with exactly 1.94 to catch accidental use of newer
+# language features.
+channel = "1.97.1"
+components = ["rustfmt", "clippy", "llvm-tools-preview"]
+targets = ["x86_64-unknown-linux-musl"]
+profile = "minimal"

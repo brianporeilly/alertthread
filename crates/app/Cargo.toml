@@ -1,0 +1,30 @@
+[package]
+name = "alertthread"
+description = "Alertmanager to Slack relay with fingerprint-keyed threading and update-on-resolve"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+# The app is a library plus a thin binary. Everything testable — handlers,
+# workers, config, the rate limiter — lives in the library; `main.rs` is wiring
+# and signal handling only, and is excluded from the coverage gate on that
+# basis. Keeping the split explicit is what makes that exclusion honest.
+[lib]
+name = "alertthread"
+path = "src/lib.rs"
+
+[[bin]]
+name = "alertthread"
+path = "src/main.rs"
+
+[dependencies]
+alertthread-core.workspace = true
+alertthread-slack.workspace = true
+alertthread-store.workspace = true
+
+[lints]
+workspace = true

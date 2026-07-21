@@ -1,0 +1,32 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Coverage artefacts
+/coverage
+/lcov.info
+*.profraw
+*.profdata
+
+# cargo-mutants
+/mutants.out
+/mutants.out.old
+
+# mdBook output
+/docs/book
+
+# Local dev state
+/.env
+*.db
+*.db-shm
+*.db-wal
+/data
+
+# insta review leftovers
+**/*.snap.new
+
+# Editors
+.idea/
+.vscode/
+*.swp
+.DS_Store

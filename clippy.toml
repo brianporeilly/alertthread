@@ -1,0 +1,35 @@
+# The workspace denies `unwrap`, `expect`, `panic` and `indexing_slicing` because a
+# panic in the delivery path is silence, and silence is the worst bug this project
+# has. None of that reasoning applies to test code: a test that unwraps is a test
+# that fails loudly, which is exactly what we want.
+#
+# AGENTS.md states the rule as "never unwrap() or expect() outside tests and
+# main() startup"; these four settings are that sentence, enforced.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+
+# MSRV, so clippy does not suggest APIs newer than the floor sqlx 0.9 sets.
+msrv = "1.94"
+
+# `clippy::doc_markdown` (pedantic) wants backticks around anything that looks
+# like an identifier. These are product names in prose, not code, and
+# backticking them would be wrong. Extending this list is preferable to
+# switching the lint off, which would also stop it catching real cases like a
+# bare `chat.postMessage`.
+#
+# `..` keeps clippy's own default list (`TypeScript`, `OAuth`, ...) in effect.
+doc-valid-idents = [
+    "..",
+    "Alertmanager",
+    "Block Kit",
+    "CloudNativePG",
+    "GitHub",
+    "Kubernetes",
+    "MiniJinja",
+    "PostgreSQL",
+    "Prometheus",
+    "SQLite",
+    "Slack",
+]

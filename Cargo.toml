@@ -1,0 +1,103 @@
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/store", "crates/slack", "crates/app", "dev/slack-mock"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/brianporeilly/alertthread"
+homepage = "https://github.com/brianporeilly/alertthread"
+authors = ["alertthread contributors"]
+
+# Pinned dependency versions, verified against crates.io on 2026-07-21.
+# Several are newer than they may appear from memory — check before assuming an API.
+# Crates declare what they need from here; the workspace owns the version.
+[workspace.dependencies]
+alertthread-core = { path = "crates/core" }
+alertthread-slack = { path = "crates/slack" }
+alertthread-store = { path = "crates/store" }
+
+anyhow = "1.0"
+axum = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+figment = { version = "0.10", features = ["env", "yaml"] }
+minijinja = "2.21"
+prometheus-client = "0.25"
+# reqwest 0.13 renamed its TLS features: `rustls-tls` no longer exists.
+# `rustls` implies rustls-platform-verifier, which needs a system trust store —
+# see docs/src/explanation/build-and-packaging.md before changing this.
+reqwest = { version = "0.13", default-features = false, features = [
+  "charset",
+  "http2",
+  "json",
+  "rustls",
+] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sqlx = { version = "0.9", default-features = false, features = [
+  "chrono",
+  "json",
+  "runtime-tokio",
+  "tls-rustls-ring",
+] }
+thiserror = "2.0"
+tokio = { version = "1.53", features = ["macros", "rt-multi-thread", "signal"] }
+tower-http = { version = "0.7", features = ["timeout", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Dev-dependencies
+insta = "1.48"
+wiremock = "0.6"
+
+# ---------------------------------------------------------------------------
+# Workspace lints
+# ---------------------------------------------------------------------------
+# Every crate opts in with `[lints] workspace = true`. Clippy runs at `pedantic`
+# with an allow-list that is documented rather than accumulated — each entry
+# below states why it is off. Adding to this list requires the same
+# justification in a PR description that lowering a coverage threshold does.
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+
+# -- Documented allow-list ---------------------------------------------------
+# `module_name_repetitions`: `store::StateStore` and `slack::SlackClient` read
+# better at the call site than the shortened names pedantic would prefer, and
+# the newtype rule in AGENTS.md means we have many deliberately explicit names.
+module_name_repetitions = "allow"
+# `must_use_candidate`: pedantic flags nearly every getter. We apply `#[must_use]`
+# where ignoring the result is an actual bug, not mechanically everywhere.
+must_use_candidate = "allow"
+
+# -- Raised above pedantic ---------------------------------------------------
+# These are deny-level because of what this service is. An alerting relay whose
+# worst failure is silence cannot afford a panic in the delivery path.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+integer_division = "deny"
+# Silently swallowing an error is the exact shape of the bug this project exists
+# to avoid — AGENTS.md: "Never swallow an error without handling it or emitting
+# a metric."
+let_underscore_must_use = "deny"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Instrumented coverage builds are 2-3x slower to run; keep them compiling fast.
+[profile.test]
+opt-level = 0

@@ -1,0 +1,16 @@
+[package]
+name = "alertthread-store"
+description = "Persistence layer for alertthread: the StateStore trait and its SQLite and PostgreSQL backends"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+alertthread-core.workspace = true
+
+[lints]
+workspace = true
