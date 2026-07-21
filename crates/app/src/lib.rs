@@ -61,7 +61,8 @@ mod tests {
         let identity = build_identity();
         let occurrences = identity.matches(version()).count();
         assert_eq!(
-            occurrences, 4,
+            occurrences,
+            4,
             "expected all four crates at version {} in {identity:?}",
             version()
         );
