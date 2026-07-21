@@ -9,6 +9,55 @@ the tree in a state where the next phase is the only thing that makes it work.
 
 ---
 
+## Current status
+
+*Last updated 2026-07-21. Keep this current — it is the first thing anyone picking the
+project up will read, and git log does not distinguish "in review" from "abandoned".*
+
+| Phase | State |
+|---|---|
+| 0 — Foundations | ✅ merged (#3) |
+| 1 — Pure core | ✅ merged (#4) |
+| 2 — Store layer | ✅ merged (#5) |
+| 3 — Slack layer | 🔵 in review (#7) |
+| **↳ group labels** | ⬜ **decided, not built — do before Phase 4** (see below) |
+| 4 — Wiring | ⬜ not started |
+| 5 — Hardening | ⬜ not started |
+| 6 — Release | ⬜ not started |
+
+ADRs [001](docs/src/adr/001-adr.md) and [002](docs/src/adr/002-implementation-gaps.md) are
+merged and accepted.
+
+### Decided but not yet built: group labels on `group_message`
+
+A small change that must land **before Phase 4**, because Phase 4 wires the renderer to the
+store and should be able to assume the labels are simply there.
+
+**Problem.** Alertmanager sends `groupLabels` as a structured object and
+`crates/core/src/webhook.rs` models it — but nothing persists it, so
+`crates/slack/src/render/view.rs` reverse-engineers `alertname` back out of the `groupKey`
+*string*, which is Alertmanager's internal serialization rather than a documented API. It
+breaks silently when `alertname` is not in `group_by`, which is a legitimate configuration.
+
+**Decision.** Add a `group_labels` JSON column to `group_message` on both backends.
+
+- Amend `0001_initial.sql` rather than adding an `0002` — nothing is released, and a stale
+  local dev volume just needs `just down` first.
+- Delete `alertname_from_group_key` and its dependency on the group-key format.
+- **The worker reads labels from `group_message`, not from the op payload.** This is the
+  structural point: `RefreshGroup` ops are generated later, when a child resolves, and D4
+  deletes outbox rows on completion — so by the first refresh the original `PostGroup`
+  payload is gone. The labels need a home with the *group's* lifetime.
+- Templates gain `{{ group.labels.* }}` instead of one derived alertname.
+
+**Why not store `commonLabels` / `commonAnnotations` too:** they are recomputed per delivery
+from current membership, so they drift as alerts join and leave the group. Written once they
+go stale, and a stale annotation is worse than an absent one. `groupLabels` has no such
+problem — it is what *defines* the group and cannot change while the group exists. Revisit
+only with refresh-on-every-delivery semantics thought through.
+
+---
+
 ## Settled decisions
 
 Recorded here so they are not re-litigated mid-build. Rationale lives in ADR 001 and the
@@ -345,3 +394,28 @@ a `/still-firing` slash command.
 2. Whether group summaries should list members inline as well as threading them (ADR).
 3. Whether to publish `alertthread-core` to crates.io as a reusable Alertmanager payload
    library. Costs API-stability obligations; decide at Phase 6, not before.
+4. **ADR 001 D9 says template rendering "panics or errors"**, but `panic = "abort"` in the
+   release profile makes `catch_unwind` dead code in every shipped build. What Phase 3 built
+   instead is a stronger guarantee — no rendering path *can* panic, enforced by the workspace
+   lint denials — but it is not what D9 describes. Reword D9, or accept the divergence
+   explicitly.
+5. **One pre-existing surviving mutant**, `crates/store/src/sqlite.rs:478`. Judged equivalent
+   on that backend; recorded so it is not rediscovered as new.
+6. **ADR 003 should collect the Phase 3–4 gaps** once Phase 4 lands, the way ADR 002 batched
+   Phases 1–2. Deliberately batched: one ADR per finding would make the numbering noise
+   rather than signal. Items 4 and 5 above are candidates, along with the eight decisions
+   listed in PR #7's body.
+
+## Process notes worth keeping
+
+- **A gate nobody has watched reject something is not a gate.** Phase 0 proved the coverage
+  and dependency-direction checks by deliberately breaking them. `just mutants` was *not*
+  given that treatment and shipped broken — it passed an invalid flag and had never run,
+  while AGENTS.md mandated it. Apply the rule to every gate, including the ones that look
+  too simple to fail.
+- **Mutation testing has earned its place.** It found a real bug in Phase 3 that coverage
+  could not see: `AlertView::from_webhook` decided "resolved?" by comparing `endsAt` against
+  `startsAt`, so a resolution landing in the same second it fired rendered as still firing.
+  The line was covered; the assertion just did not care.
+- **Phases ending in working code find things re-reading documents does not.** Every gap in
+  ADR 002 was found by implementing the case, not by review.
