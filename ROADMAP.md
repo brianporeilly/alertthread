@@ -23,7 +23,65 @@ sessions that produced it.
 | Docs | Diátaxis, rendered by mdBook, written per-phase not at the end |
 | Test env | `podman compose` stack + `#[sqlx::test]`; no testcontainers |
 | Task runner | `just` — **CI invokes the same recipes developers do** |
+| Coverage | Enforced per-crate, gating `just test` and `just ci` — see below |
 | Licence | Dual `MIT OR Apache-2.0` |
+
+---
+
+## Coverage policy
+
+Coverage gates `just test` and `just ci`. A change that drops a crate below its threshold
+fails the build.
+
+**Thresholds are per-crate, not a single workspace number.** A flat percentage across the
+workspace is the standard way these gates fail: it lets genuinely critical logic sit
+undertested as long as easy-to-cover code drags the average up, and it simultaneously
+pushes people to write line-touching tests for `main.rs` to buy back headroom. Tiering by
+how testable and how critical each crate actually is puts the strictest bar exactly where
+the risk lives.
+
+| Crate | Line coverage | Why that number |
+|---|---|---|
+| `alertthread-core` | **100%** | It is pure. No I/O, no clock, no runtime. Every branch is reachable with a plain function call, so anything less than 100% means dead code or an untested branch — and this crate holds every correctness decision in the project |
+| `alertthread-store` | 95% | Conformance suite covers the trait exhaustively; the residue is driver-level error paths that need fault injection to reach |
+| `alertthread-slack` | 95% | `wiremock` covers the API surface; the residue is `reqwest` transport failures |
+| `alertthread` (app) | 95% | Handlers, workers, config and the rate limiter are all directly testable. `main.rs` is **excluded** — ~50 lines of wiring and signal handling — rather than papered over with a lower threshold |
+| `dev/slack-mock` | excluded | Development tooling, not shipped |
+
+Excluding `main.rs` outright is deliberate and preferable to setting the app threshold low
+enough to absorb it. An explicit, justified exclusion is honest; a soft threshold hides how
+well the code that *does* matter is covered.
+
+### Coverage is a floor, not the goal
+
+Line coverage proves a line *executed*. It does not prove an assertion would have caught a
+regression, and the gap between those two is exactly where alerting bugs live. A test that
+runs `plan()` and asserts nothing scores 100%.
+
+So the real quality gate on the core is **mutation testing** via `cargo-mutants`: it
+changes the code and checks that a test fails. For a system whose worst failure mode is
+silence, "would we have noticed?" is the only question worth asking, and mutation testing
+is the only tool that answers it.
+
+Mutation runs are slow, so they are not in the default loop:
+
+- `just mutants` — on demand, and **required for any change to `alertthread-core`**
+- Nightly in CI across the workspace
+- Target: no surviving mutants in `core`; triage and document elsewhere
+
+### Tooling and the inner loop
+
+`cargo-llvm-cov` (with `nextest`) produces the report; a thresholds table is enforced from
+its JSON output.
+
+Instrumentation costs roughly 2–3× on test runtime, which is too slow to sit in a
+tight edit-test cycle. So there is an explicit escape hatch:
+
+- `just test-fast` — no instrumentation, for the inner loop
+- `just test` — instrumented and gated, as the pre-push check
+- `just ci` — everything, including coverage and the per-crate thresholds
+
+`just test-fast` is a convenience, not a way to avoid the gate. CI runs `just ci`.
 
 ### Pinned dependency versions
 
@@ -120,8 +178,12 @@ Scaffolding only. No relay behaviour.
 - `[workspace.lints]` — `unsafe_code = "forbid"`, clippy `pedantic` with a documented
   allow-list
 - `rustfmt.toml`, `deny.toml`, `.editorconfig`
-- `justfile`: `fmt`, `lint`, `test`, `test-pg`, `docs`, `up`, `down`, `ci`
-- GitHub Actions calling those same recipes: fmt, clippy, test, deny, MSRV, docs
+- `justfile`: `fmt`, `lint`, `test`, `test-fast`, `test-pg`, `coverage`, `mutants`,
+  `docs`, `up`, `down`, `ci`
+- `cargo-llvm-cov` + `cargo-nextest` + `cargo-mutants` installed and wired
+- Per-crate coverage thresholds enforced from `cargo-llvm-cov` JSON output
+- GitHub Actions calling those same recipes: fmt, clippy, test, coverage, deny, MSRV,
+  docs; plus a nightly `mutants` job
 - mdBook skeleton with the full Diátaxis tree; move PRD + ADR to `docs/src/adr/`
 - `LICENSE-MIT`, `LICENSE-APACHE`, `README.md`, `CONTRIBUTING.md`
 - `compose.yaml`: postgres + a stub slack-mock
@@ -138,8 +200,12 @@ under musl. If it does not, we need to know in Phase 0 while the fallbacks are c
 (distroless-glibc, or the pure-Rust `rusqlite` alternatives) rather than in Phase 6 when
 the Dockerfile is load-bearing.
 
-**Exit:** `just ci` green locally and in CI. `podman compose up` starts. `mdbook build`
-works. A hello-world static binary runs from a `scratch` image.
+**Exit:** `just ci` green locally and in CI, *including the coverage gate* — proven by
+deliberately committing an uncovered branch and watching the build fail. `podman compose up`
+starts. `mdbook build` works. A hello-world static binary runs from a `scratch` image.
+
+> The coverage gate must be verified to actually fail in Phase 0. A threshold nobody has
+> seen reject anything is not a gate.
 
 ---
 
@@ -160,7 +226,8 @@ discover it. No database or HTTP work gets thrown away.
 
 **Docs:** `explanation/fingerprint-correlation.md`, `explanation/why-outbox.md`.
 
-**Exit:** `plan()` fully covered. Core crate has zero I/O dependencies, verified in CI.
+**Exit:** `alertthread-core` at **100% line coverage** with **no surviving mutants** under
+`just mutants`. Zero I/O dependencies, verified in CI.
 
 ---
 

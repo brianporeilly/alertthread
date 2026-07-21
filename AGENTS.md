@@ -83,6 +83,42 @@ Testing is not a phase. A change without tests is not done.
   only one.
 - Never write a test that asserts an alert was dropped. That is not a behaviour we have.
 
+### Coverage gate
+
+`just test` and `just ci` fail if any crate drops below its threshold.
+
+| Crate | Threshold |
+|---|---|
+| `alertthread-core` | **100%** |
+| `alertthread-store` | 95% |
+| `alertthread-slack` | 95% |
+| `alertthread` (app) | 95% — `main.rs` excluded |
+| `dev/slack-mock` | excluded |
+
+Use `just test-fast` in the inner loop; instrumentation costs 2–3× runtime. It is a
+convenience, not a way around the gate.
+
+**Do not chase the threshold with tests that assert nothing.** A test that calls a function
+to touch its lines and checks no output scores full coverage and catches nothing — in this
+codebase it manufactures false confidence about the alerting path, which is worse than the
+uncovered line was. If a branch is genuinely unreachable, delete it. If it is genuinely
+untestable, exclude it explicitly with a comment saying why, and say so in the PR.
+
+**If you lower a threshold or add an exclusion, say so in the PR description and justify
+it.** Silently weakening the gate to make a change pass is the one move that is never
+acceptable here.
+
+### Mutation testing
+
+Coverage proves a line ran. It does not prove a test would have caught the regression.
+`cargo-mutants` closes that gap by breaking the code and checking that something fails.
+
+- **Required for any change to `alertthread-core`**: `just mutants`, no surviving mutants.
+- Runs nightly across the workspace; elsewhere, triage survivors rather than gating on them.
+
+For a system whose worst failure is silence, "would we have noticed?" is the question that
+matters, and this is the only tool that answers it.
+
 ---
 
 ## Documentation
@@ -117,11 +153,14 @@ passes in CI.
 ```
 just fmt        # rustfmt
 just lint       # clippy -D warnings
-just test       # unit + sqlite integration (no containers needed)
+just test       # unit + sqlite integration, instrumented + coverage gate
+just test-fast  # same tests, no instrumentation — for the inner loop
 just test-pg    # postgres conformance (needs `just up`)
+just coverage   # report only, no gate — for finding the gaps
+just mutants    # mutation testing; required for core changes
 just docs       # mdbook build + link check
 just up/down    # podman compose dev stack
-just ci         # everything CI runs
+just ci         # everything CI runs, including the coverage gate
 ```
 
 Run `just ci` before proposing a change. Do not hand-run `cargo` commands that a recipe
@@ -167,12 +206,13 @@ Real ones, discovered the hard way. Each has cost somebody time.
 
 ## Definition of done
 
-1. `just ci` passes.
+1. `just ci` passes — including the per-crate coverage gate.
 2. Tests exist per the table above, and fail without the change.
-3. Docs updated in the correct quadrant.
-4. No new path can result in an alert going unposted.
-5. Public items have doc comments; anything non-obvious says *why*.
-6. New config appears in `reference/configuration.md`; new metrics in
+3. Changes to `alertthread-core` leave no surviving mutants.
+4. Docs updated in the correct quadrant.
+5. No new path can result in an alert going unposted.
+6. Public items have doc comments; anything non-obvious says *why*.
+7. New config appears in `reference/configuration.md`; new metrics in
    `reference/metrics.md`.
 
 ## When to stop and ask
