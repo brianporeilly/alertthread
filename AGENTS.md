@@ -15,9 +15,9 @@ merge.
 
 | Document | What it is |
 |---|---|
-| [`docs/001-adr.md`](docs/001-adr.md) | The architecture. Decisions D1–D12 are settled |
+| [`docs/src/adr/001-adr.md`](docs/src/adr/001-adr.md) | The architecture. Decisions D1–D12 are settled |
 | [`ROADMAP.md`](ROADMAP.md) | Phases, pinned versions, settled choices |
-| [`docs/000-prd.md`](docs/000-prd.md) | Problem statement and prior research |
+| [`docs/src/adr/000-prd.md`](docs/src/adr/000-prd.md) | Problem statement and prior research |
 
 **Do not re-litigate settled decisions.** Rust over Go, outbox over synchronous posting,
 SQLite-default with Postgres-optional, per-fingerprint with storm-collapse — all decided,

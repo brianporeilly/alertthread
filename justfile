@@ -34,6 +34,9 @@ lint:
     @just check-deps
 
 # Enforce the dependency direction: core stays pure, layering is not inverted.
+# Private so `just --list` shows exactly the recipe set AGENTS.md documents.
+# It is still directly invokable, and `lint` calls it.
+[private]
 check-deps:
     ./scripts/check-deps.sh
 
@@ -50,11 +53,11 @@ test:
         nextest
     ./scripts/coverage-gate.py {{ llvm_cov_json }}
 
-# The same tests without instrumentation — for the inner loop.
-#
 # Instrumentation costs 2-3x on runtime, which is too slow for a tight
 # edit-test cycle. This is a convenience, not a way around the gate: CI runs
 # `just ci`, which does not use this recipe.
+#
+# The same tests without instrumentation — for the inner loop.
 test-fast:
     cargo nextest run --workspace
 
@@ -78,11 +81,11 @@ coverage:
         nextest
     @echo "Report: {{ coverage_dir }}/html/index.html"
 
-# Mutation testing. Required for any change to alertthread-core.
-#
 # Coverage proves a line ran; it does not prove a test would have caught the
 # regression. For a system whose worst failure is silence, "would we have
 # noticed?" is the question that matters, and this is the tool that answers it.
+#
+# Mutation testing. Required for any change to alertthread-core.
 mutants *ARGS:
     cargo mutants --workspace --in-place=false {{ ARGS }}
 

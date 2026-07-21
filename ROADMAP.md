@@ -1,7 +1,7 @@
 # Implementation roadmap
 
 Phased plan for building `alertthread`, the Alertmanager → Slack threading relay.
-Architecture is specified in [ADR 001](docs/001-adr.md); this document is *how we get
+Architecture is specified in [ADR 001](docs/src/adr/001-adr.md); this document is *how we get
 there*, not *what it is*. Where they conflict, the ADR wins.
 
 **Guiding rule:** each phase ends with something that runs and is tested. No phase leaves
