@@ -17,7 +17,7 @@
 
 use std::collections::BTreeMap;
 
-use alertthread_core::{Fingerprint, GroupKey, LabelMap, WebhookAlert};
+use alertthread_core::{Fingerprint, GroupKey, Intent, LabelMap, WebhookAlert};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::Serialize;
 
@@ -55,10 +55,16 @@ impl AlertView {
             labels: alert.labels.clone(),
             annotations: alert.annotations.clone(),
             starts_at: alert.starts_at,
-            // Alertmanager sends the zero time for an alert that is still firing rather
-            // than omitting `endsAt`, so "is it before startsAt?" is the test, not
-            // "is it present?".
-            resolved_at: (alert.ends_at > alert.starts_at).then_some(alert.ends_at),
+            // Read from `status`, not from `endsAt`. Alertmanager sends the zero time for
+            // an alert that is still firing rather than omitting the field, so `endsAt`
+            // alone needs a comparison against `startsAt` — and that comparison is wrong
+            // for a resolution that lands in the same second it fired, which would render
+            // a resolved alert as still firing. `status` is the sender's own answer, and
+            // it is the same signal the core classifies on.
+            resolved_at: match alert.status.intent() {
+                Intent::Resolved => Some(alert.ends_at),
+                Intent::Firing => None,
+            },
             generator_url: alert.generator_url.clone(),
         }
     }
@@ -69,12 +75,7 @@ impl AlertView {
     /// -3 minutes" in an alert channel costs more credibility than it buys information.
     fn duration(&self, now: DateTime<Utc>) -> TimeDelta {
         let end = self.resolved_at.unwrap_or(now);
-        let delta = end - self.starts_at;
-        if delta < TimeDelta::zero() {
-            TimeDelta::zero()
-        } else {
-            delta
-        }
+        (end - self.starts_at).max(TimeDelta::zero())
     }
 }
 
@@ -519,8 +520,17 @@ mod tests {
     fn a_duration_that_would_be_negative_is_clamped_to_zero() {
         // Clock skew between Prometheus and the relay is normal. "fired for -3 minutes"
         // in an alert channel costs more credibility than it buys information.
-        let vars = AlertVars::build(&view(), at(1_784_642_520 - 600));
-        assert_eq!(vars.duration, "0s");
+        //
+        // Both offsets matter: a whole number of minutes happens to render as "0s" even
+        // without the clamp, so only the ragged one proves the clamp is doing anything.
+        assert_eq!(
+            AlertVars::build(&view(), at(1_784_642_520 - 600)).duration,
+            "0s"
+        );
+        assert_eq!(
+            AlertVars::build(&view(), at(1_784_642_520 - 90)).duration,
+            "0s"
+        );
     }
 
     #[test]
@@ -556,6 +566,37 @@ mod tests {
         assert_eq!(built.resolved_at, None);
         assert_eq!(built.fingerprint, Fingerprint::new("abc"));
         assert_eq!(built.generator_url, "http://p");
+    }
+
+    #[test]
+    fn a_resolution_landing_in_the_same_second_it_fired_is_still_a_resolution() {
+        // Comparing `endsAt` against `startsAt` instead of reading `status` gets this
+        // wrong, and gets it wrong in the direction that renders a resolved alert as
+        // still firing — a permanently red message for an alert that has cleared.
+        let alert: WebhookAlert = serde_json::from_str(
+            r#"{"status":"resolved","labels":{"alertname":"X"},"annotations":{},
+                "startsAt":"2026-07-21T14:02:00Z","endsAt":"2026-07-21T14:02:00Z",
+                "fingerprint":"abc"}"#,
+        )
+        .expect("fixture parses");
+        assert_eq!(
+            AlertView::from_webhook(&alert).resolved_at,
+            Some(at(1_784_642_520))
+        );
+    }
+
+    #[test]
+    fn an_alert_with_an_unrecognised_status_is_not_treated_as_resolved() {
+        // The core treats an unknown status as firing (ADR 002 §2.2); rendering has to
+        // agree with it, or the same alert would be tracked as firing and displayed as
+        // resolved.
+        let alert: WebhookAlert = serde_json::from_str(
+            r#"{"status":"suppressed","labels":{"alertname":"X"},"annotations":{},
+                "startsAt":"2026-07-21T14:02:00Z","endsAt":"2026-07-21T14:31:00Z",
+                "fingerprint":"abc"}"#,
+        )
+        .expect("fixture parses");
+        assert_eq!(AlertView::from_webhook(&alert).resolved_at, None);
     }
 
     #[test]

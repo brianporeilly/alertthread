@@ -122,9 +122,10 @@ fn chunk(text: &str, limit: usize) -> Vec<String> {
             last_break = Some(count);
         }
         if count >= limit {
-            // Prefer the last newline, but only if it leaves a chunk worth having.
-            // Breaking at character 3 of a 3000-character budget would produce 999 near
-            // -empty blocks out of one long unbroken line.
+            // Prefer the last newline, but only if it is past the halfway mark and so
+            // leaves a chunk worth having. Breaking at character 3 of a 3000-character
+            // budget would turn one long unbroken line into hundreds of near-empty
+            // blocks — which is how avoiding one Slack limit runs into the other.
             let split = last_break.filter(|at| *at * 2 > limit).unwrap_or(count);
             let head: String = current.chars().take(split).collect();
             let tail: String = current.chars().skip(split).collect();
@@ -175,7 +176,7 @@ pub(crate) fn notification(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{MAX_SECTIONS, Truncation, chunk, notification, sections, tidy};
-    use crate::message::{Block, MAX_BLOCKS, MAX_SECTION_CHARS};
+    use crate::message::{Block, MAX_BLOCKS, MAX_NOTIFICATION_CHARS, MAX_SECTION_CHARS};
 
     fn section_text(block: &Block) -> String {
         match block {
@@ -261,6 +262,26 @@ mod tests {
         assert_eq!(blocks.len(), 2);
         assert!(section_text(&blocks[0]).ends_with('\n'));
         assert_eq!(section_text(&blocks[0]).chars().count(), 2_001);
+    }
+
+    #[test]
+    fn a_newline_exactly_at_the_halfway_mark_is_not_used_as_a_boundary() {
+        // The boundary of "past the halfway mark". Stated as a test because it is the
+        // difference between a 3000-character block and a 1500-character one, and nothing
+        // else in the suite would notice it moving.
+        // Half of MAX_SECTION_CHARS, written out: `integer_division` is denied here, and
+        // for good reason — this is the one place a rounding assumption would be silent.
+        const HALF: usize = 1_500;
+        assert_eq!(HALF * 2, MAX_SECTION_CHARS);
+
+        let body = format!("{}\n{}", "c".repeat(HALF - 1), "d".repeat(4_000));
+        let chunks = chunk(&body, MAX_SECTION_CHARS);
+        assert_eq!(chunks[0].chars().count(), MAX_SECTION_CHARS);
+
+        // One character later it is past the mark, and is used.
+        let body = format!("{}\n{}", "c".repeat(HALF), "d".repeat(4_000));
+        let chunks = chunk(&body, MAX_SECTION_CHARS);
+        assert_eq!(chunks[0].chars().count(), HALF + 1);
     }
 
     #[test]
@@ -358,6 +379,17 @@ mod tests {
         let preview = notification(&long);
         assert_eq!(preview.chars().count(), 201);
         assert!(preview.ends_with('…'));
+    }
+
+    #[test]
+    fn a_notification_exactly_at_the_limit_is_not_elided() {
+        // The boundary either side: at the limit the text is whole, one over and it is
+        // cut. An off-by-one here puts an ellipsis on a headline that fits.
+        let exact = "n".repeat(MAX_NOTIFICATION_CHARS);
+        assert_eq!(notification(&exact), exact);
+
+        let one_over = "n".repeat(MAX_NOTIFICATION_CHARS + 1);
+        assert!(notification(&one_over).ends_with('…'));
     }
 
     #[test]

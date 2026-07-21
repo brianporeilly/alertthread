@@ -38,6 +38,7 @@ mod view;
 
 use std::collections::BTreeMap;
 
+use chrono::{DateTime, Utc};
 use minijinja::{Environment, UndefinedBehavior, Value, context};
 
 use crate::message::{Colour, MessageBody};
@@ -213,7 +214,7 @@ impl Renderer {
     /// If the template errors, or renders to nothing, the returned body is the hardcoded
     /// minimal message of ADR 001 D9 and [`Rendered::degraded`] says so.
     #[must_use]
-    pub fn render(&self, request: &RenderRequest<'_>, now: chrono::DateTime<Utc>) -> Rendered {
+    pub fn render(&self, request: &RenderRequest<'_>, now: DateTime<Utc>) -> Rendered {
         let template = request.kind();
         let colour = request.colour();
 
@@ -275,8 +276,6 @@ impl Renderer {
         }
     }
 }
-
-use chrono::Utc;
 
 /// Compiles one template into the environment, recording it if it will not compile.
 ///
@@ -619,7 +618,18 @@ mod tests {
         assert_eq!(rejected.len(), 1);
         let rejection: &RejectedOverride = &rejected[0];
         assert_eq!(rejection.template, TemplateKind::Resolved);
-        assert!(!rejection.detail.is_empty());
+        // The only signal an operator gets that the ConfigMap they just applied is not in
+        // effect, so it has to name the template and the line.
+        assert!(
+            rejection.detail.contains("syntax error"),
+            "{}",
+            rejection.detail
+        );
+        assert!(
+            rejection.detail.contains("resolved:1"),
+            "{}",
+            rejection.detail
+        );
 
         let mut alert = alert();
         alert.resolved_at = Some(at(NOW));
