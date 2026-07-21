@@ -37,11 +37,17 @@
 //! things it needs — [`Disposition`] and [`Rendered::degraded`] — are the parts of this
 //! API designed hardest.
 
+mod client;
 mod error;
 mod message;
 mod render;
 mod token;
 
+pub use client::{
+    AuthIdentity, DEFAULT_BASE_URL, DEFAULT_TIMEOUT, OwnedUpdate, PostMessage, PostedMessage,
+    RETRY_AFTER_DEFAULT, RETRY_AFTER_MAX, RETRY_AFTER_MIN, SlackClient, SlackClientBuilder,
+    UpdateMessage, update_group,
+};
 pub use error::{Disposition, SlackError, SlackMethod};
 pub use message::{
     Attachment, Block, Colour, MAX_BLOCKS, MAX_NOTIFICATION_CHARS, MAX_SECTION_CHARS, MessageBody,
