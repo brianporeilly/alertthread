@@ -16,6 +16,7 @@
 
 - [Configuration](reference/configuration.md)
 - [HTTP API](reference/http-api.md)
+- [Slack errors](reference/slack-errors.md)
 - [Metrics](reference/metrics.md)
 
 # Explanation
