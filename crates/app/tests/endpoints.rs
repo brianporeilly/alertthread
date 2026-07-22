@@ -185,13 +185,41 @@ async fn healthz_is_process_alive_and_does_not_touch_the_store() {
     // buffering depends on. Proven by pointing the relay at a store with no schema.
     let slack = slack_that_works().await;
     let relay = Harness::new("endpoints-healthz", &slack).await;
-    let server = relay.serve().await;
 
-    let response = reqwest::get(format!("{}/healthz", server.base))
+    // The store the handler must not consult: connected, but never migrated, so any query
+    // against it fails. `/readyz` returns 503 for exactly this store; `/healthz` must not.
+    let unmigrated = alertthread_store::Store::connect(
+        alertthread_store::Backend::Sqlite,
+        &harness::sqlite_url("endpoints-healthz-empty"),
+    )
+    .await
+    .expect("opening an unmigrated store");
+
+    let state = std::sync::Arc::new(alertthread::http::AppState::new(
+        std::sync::Arc::new(unmigrated),
+        std::sync::Arc::clone(&relay.metrics),
+        &relay.config,
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (source, token) = alertthread::shutdown::cancellation();
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, alertthread::http::router(state))
+            .with_graceful_shutdown(async move { token.cancelled().await })
+            .await
+            .unwrap();
+    });
+
+    let response = reqwest::get(format!("http://{addr}/healthz"))
         .await
         .expect("the relay answers");
     assert_eq!(response.status(), 200);
-    server.stop().await;
+    // The body too, not just the status: an empty 200 is what a handler that had stopped
+    // doing anything would also return.
+    assert_eq!(response.text().await.unwrap(), "ok\n");
+
+    source.cancel();
+    handle.await.unwrap();
 }
 
 #[tokio::test]

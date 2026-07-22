@@ -308,10 +308,7 @@ impl<S: StateStore + 'static> Worker<S> {
                 }
             };
 
-            // A pass that filled its batch probably has more behind it, so go straight
-            // round again. Anything else waits, which is what keeps an idle relay from
-            // spinning on an empty queue four times a second.
-            if pass.leased < self.config.batch_size as usize {
+            if should_pause(pass.leased, self.config.batch_size as usize) {
                 sleep_or_shutdown(&shutdown, self.config.idle_poll).await;
             }
         }
@@ -421,6 +418,15 @@ pub async fn auth_probe_loop(
     }
 }
 
+/// Whether the worker should wait before leasing again.
+///
+/// A pass that filled its batch probably has more behind it, so it goes straight round
+/// again. Anything short of a full batch waits — which is the only thing stopping an idle
+/// relay from spinning against the store as fast as the loop turns.
+const fn should_pause(leased: usize, batch_size: usize) -> bool {
+    leased < batch_size
+}
+
 /// Waits, or returns early when shutdown is signalled.
 ///
 /// The early return is why this exists: an hourly pruner that only checked its flag after
@@ -506,6 +512,17 @@ mod tests {
         for op in &ops {
             assert_eq!(channel_of(op), &channel(), "{op:?}");
         }
+    }
+
+    #[test]
+    fn only_a_full_batch_goes_straight_round_again() {
+        // Both boundaries. Pausing on a full batch costs throughput under load; not
+        // pausing on a short one spins against the store as fast as the loop turns, which
+        // burns a core and answers nothing.
+        assert!(super::should_pause(0, 10), "an empty queue waits");
+        assert!(super::should_pause(9, 10), "a short batch waits");
+        assert!(!super::should_pause(10, 10), "a full batch does not");
+        assert!(!super::should_pause(11, 10), "nor an over-full one");
     }
 
     #[test]
