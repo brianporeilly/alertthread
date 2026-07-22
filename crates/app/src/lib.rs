@@ -10,7 +10,26 @@
 //! persists whatever was decided in the same transaction. Handlers execute
 //! decisions; they do not make them.
 //!
-//! Phase 0 is scaffolding only — the server arrives in Phase 4.
+//! # Where to start reading
+//!
+//! | Module | What |
+//! |---|---|
+//! | [`config`] | figment layering, and the three settings that refuse to start |
+//! | [`http`] | the four endpoints, including why `/readyz` diverges from ADR 001 D11 |
+//! | [`worker`] | the outbox loop: lease, fan out by channel, drain each serially |
+//! | [`delivery`] | one op, one Slack call, and ADR 001 D9's failure table |
+//! | [`ratelimit`] | the per-channel token bucket Slack's 1/sec limit requires |
+//! | [`metrics`] | ADR 001 D11, and why its gauges are sampled rather than queried |
+//! | [`run`] | startup wiring, kept out of `main.rs` so it can be tested |
+
+pub mod config;
+pub mod delivery;
+pub mod http;
+pub mod metrics;
+pub mod ratelimit;
+pub mod run;
+pub mod shutdown;
+pub mod worker;
 
 /// The version of the running binary, as recorded in its `Cargo.toml`.
 #[must_use]

@@ -26,5 +26,31 @@ alertthread-core.workspace = true
 alertthread-slack.workspace = true
 alertthread-store.workspace = true
 
+anyhow.workspace = true
+axum.workspace = true
+# `clock` is re-enabled here and nowhere else. The core is deliberately built
+# without it so `Utc::now()` does not exist there (AGENTS.md: time enters the
+# core as a `now:` parameter); the shell is the layer whose job it is to read a
+# clock and pass the answer in.
+chrono = { workspace = true, features = ["clock"] }
+figment.workspace = true
+prometheus-client.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+# The worker and the handlers are tested against a real SQLite store and a real
+# HTTP server, not against mocks: `wiremock` plays Slack, `reqwest` drives the
+# axum router over a loopback socket, and the store is the one that ships.
+# A handler tested through a fake router is a test of the fake.
+reqwest = { workspace = true }
+tokio = { workspace = true, features = ["fs", "time"] }
+wiremock.workspace = true
+
 [lints]
 workspace = true
