@@ -147,8 +147,35 @@ mutants *ARGS:
     # test`. It also gives each test its own process, which matters for the
     # store: `#[sqlx::test]` keeps a per-process connection pool, and a mutant
     # that wedges one test should not slow the rest of the suite down with it.
+    #
+    # --exclude-re suppresses exactly one mutant, which is genuinely equivalent
+    # on this backend and therefore cannot be killed by any test worth writing:
+    #
+    #     if inserted.rows_affected() > 0 { return Ok(true); }
+    #
+    # `rows_affected()` is unsigned, so `>= 0` is a tautology and the mutant
+    # makes the function always report that it opened the group. That is
+    # unobservable *here* because the fall-through below it is unreachable on
+    # SQLite: `BEGIN IMMEDIATE` serialises the two ingests, so a transaction
+    # that planned a `PostGroup` always wins the insert. The same line is
+    # reachable on PostgreSQL, where the conformance suite covers it.
+    #
+    # It is excluded by name rather than by line, because the line moves
+    # whenever anything above it does — ROADMAP known open item #5 was already
+    # rediscovered once that way. It is excluded as one mutant rather than with
+    # `#[mutants::skip]` on the function or an `--exclude` on the file: the
+    # other two mutants at the same site, `> with ==` and `> with <`, are both
+    # caught, and widening this to hide them would trade one honest exception
+    # for a blind spot in the code that decides whether a storm produces one
+    # summary or one per replica.
+    #
+    # Without it this recipe exits non-zero on a correct tree, which is worse
+    # than useless: AGENTS.md requires a clean run for every change to
+    # `alertthread-core`, and a gate that rejects everything trains people to
+    # ignore its exit code until the next real survivor rides in behind it.
     cargo mutants --workspace --test-tool nextest \
-        --exclude 'crates/store/src/postgres.rs' {{ ARGS }}
+        --exclude 'crates/store/src/postgres.rs' \
+        --exclude-re 'replace > with >= in persist_group' {{ ARGS }}
 
 # Mutation testing for the PostgreSQL backend. Needs `just up`.
 #
