@@ -385,29 +385,22 @@ a `/still-firing` slash command.
    instead is a stronger guarantee — no rendering path *can* panic, enforced by the workspace
    lint denials — but it is not what D9 describes. Reword D9, or accept the divergence
    explicitly.
-5. **One pre-existing surviving mutant**, `replace > with >= in persist_group`, currently
-   `crates/store/src/sqlite.rs:488`. Judged equivalent on that backend; recorded so it is
-   not rediscovered as new. Cite it by name as well as by line — the line moves whenever
-   the function above it does.
+5. **One equivalent mutant is excluded by name**, `replace > with >= in persist_group`,
+   currently `crates/store/src/sqlite.rs:488`. `rows_affected()` is unsigned, so `>= 0` is a
+   tautology, and the fall-through it controls is unreachable on SQLite — no test worth
+   writing can kill it. Excluded via `--exclude-re` in the `mutants` recipe, which carries
+   the argument; cite it by name and not by line, because the line moves whenever anything
+   above it does. The other two mutants at the same site, `> with ==` and `> with <`, are
+   deliberately still gated and both caught.
 6. **ADR 003 should collect the Phase 3–4 gaps** once Phase 4 lands, the way ADR 002 batched
    Phases 1–2. Deliberately batched: one ADR per finding would make the numbering noise
-   rather than signal. Items 4, 5 and 7 above are candidates, along with the eight decisions
+   rather than signal. Items 4 and 7 above are candidates, along with the eight decisions
    listed in PR #7's body.
 7. **`group_message.group_labels` is not in ADR 001 D4's schema sketch.** Same class of
    finding as ADR 002 §3.3's `outbox.dead_lettered_at`: D4 sketched the table before the
    question of how a summary names itself had been asked. The column is write-once and the
    reasoning is recorded in both migrations and on `GroupRecord`; the ADR is not rewritten.
    Fold into ADR 003.
-8. **`just mutants` always exits non-zero, and therefore currently gates nothing.** Item 5's
-   survivor is judged equivalent, so it will never be killed — which means the recipe exits
-   2 on every run, forever, on a tree that is otherwise correct. AGENTS.md requires
-   "`just mutants`, no surviving mutants" for any change to `alertthread-core`, and as
-   written no one can satisfy it. This is the process note below turned inside out: a gate
-   that always fails trains people to ignore its exit code, and the next *genuinely* new
-   survivor rides in behind the one everybody has learned to wave through. **Fix before
-   Phase 4**, which touches core: exclude that one mutant by name with the equivalence
-   argument inline, so a non-zero exit means something again. Do not widen the exclusion to
-   the file or the function.
 
 ## Process notes worth keeping
 
@@ -416,6 +409,21 @@ a `/still-firing` slash command.
   given that treatment and shipped broken — it passed an invalid flag and had never run,
   while AGENTS.md mandated it. Apply the rule to every gate, including the ones that look
   too simple to fail.
+
+  It has since been given the treatment, in both directions: it exits 0 on a correct tree,
+  and stubbing out two assertions in `Policy::validate`'s tests made it report the two
+  resulting survivors and exit 2. Worth knowing what that second run actually showed, which
+  was not what was expected: deleting the *negative*-debounce assertion alone left every
+  mutant caught, because the `< TimeDelta::zero()` boundary was incidentally pinned by the
+  *zero*-debounce test next to it. A test can look like the thing holding a branch down
+  while a neighbour is doing the work — which is the same lesson as the gate itself, one
+  level in.
+- **A gate that rejects everything is not a gate either.** The exclusion above exists
+  because the recipe otherwise exits non-zero on a correct tree, forever. That is not the
+  safe direction to fail in: an exit code that is always the same carries no information,
+  and people learn to wave it through, so the next genuinely new survivor arrives behind the
+  one everybody already ignores. Exclude the equivalent mutant by name, argue it in place,
+  and keep the exit code meaningful.
 - **Mutation testing has earned its place.** It found a real bug in Phase 3 that coverage
   could not see: `AlertView::from_webhook` decided "resolved?" by comparing `endsAt` against
   `startsAt`, so a resolution landing in the same second it fired rendered as still firing.
