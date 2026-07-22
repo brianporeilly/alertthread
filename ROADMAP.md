@@ -394,13 +394,34 @@ a `/still-firing` slash command.
    deliberately still gated and both caught.
 6. **ADR 003 should collect the Phase 3–4 gaps** once Phase 4 lands, the way ADR 002 batched
    Phases 1–2. Deliberately batched: one ADR per finding would make the numbering noise
-   rather than signal. Items 4 and 7 above are candidates, along with the eight decisions
-   listed in PR #7's body.
+   rather than signal. Items 4, 7, 8 and 9 above are candidates, along with the eight
+   decisions listed in PR #7's body.
 7. **`group_message.group_labels` is not in ADR 001 D4's schema sketch.** Same class of
    finding as ADR 002 §3.3's `outbox.dead_lettered_at`: D4 sketched the table before the
    question of how a summary names itself had been asked. The column is write-once and the
    reasoning is recorded in both migrations and on `GroupRecord`; the ADR is not rewritten.
    Fold into ADR 003.
+8. **`/readyz` deliberately does NOT check Slack auth, and D11 says it should.** Argued and
+   decided in review before Phase 4 was written, so this is an explicit divergence rather
+   than a quiet one.
+
+   Readiness controls whether the pod receives webhooks. If Slack auth is broken the correct
+   behaviour is to *accept* the webhook, persist it to the outbox and retry — that is what
+   the outbox is for. Going unready makes Alertmanager's POST fail, it retries a few times,
+   then gives up, and **the alert is lost**: silence, from a condition the outbox was
+   specifically designed to survive. It is worse with replicas, which all share one token
+   and would therefore all flip unready at once, leaving no healthy pod to shed traffic to.
+
+   The store *is* checked, because a relay that cannot reach its store cannot durably accept
+   a delivery, so a 200 would acknowledge an alert it cannot persist.
+
+   Mid-life token revocation is caught instead by a 15-minute background prober feeding
+   `alertthread_slack_auth_valid`, which operators alert on. Three mechanisms, three jobs:
+   startup fails fast on a bad token, `/readyz` gates on the store, the prober catches
+   revocation. Fold into ADR 003.
+9. **`alertthread_slack_auth_valid` is not in D11's metric list.** It exists because of item
+   8 — the prober needs somewhere to put its verdict. Same class as item 7: D11 enumerated
+   the metrics before the question it answers had been asked. Fold into ADR 003.
 
 ## Process notes worth keeping
 
