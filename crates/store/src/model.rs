@@ -10,6 +10,9 @@ use alertthread_core::{
     ChannelId, Fingerprint, GroupKey, GroupState, LabelMap, MessageTs, ThreadTs,
 };
 use chrono::{DateTime, TimeDelta, Utc};
+use std::collections::BTreeMap;
+
+use crate::payload::OpKind;
 
 /// The primary key of an outbox row.
 ///
@@ -309,6 +312,56 @@ impl PruneStats {
     /// Whether this pass deleted anything at all.
     pub const fn is_empty(&self) -> bool {
         self.resolved_alerts == 0 && self.stale_alerts == 0 && self.empty_groups == 0
+    }
+}
+
+/// What the relay looks like from the outside, in one sample.
+///
+/// Every field here is a metric from ADR 001 D11, and the whole struct is read on a
+/// background interval rather than inside `GET /metrics`. That is deliberate: a Prometheus
+/// scraping every 15 seconds across N replicas would otherwise be a load generator pointed
+/// at the outbox, and a slow store would make the scrape time out and take *every* other
+/// metric with it — including the ones that would have said why.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StoreStats {
+    /// How many rows are queued and leasable, per kind: `alertthread_outbox_depth{op}`.
+    ///
+    /// Kinds with nothing queued are absent rather than zero. The sampler holds the label
+    /// set steady itself, because a gauge that stops being reported reads as "no data" and
+    /// not as "nothing pending".
+    pub outbox_depth: BTreeMap<OpKind, u64>,
+    /// How many rows have been parked by [`StateStore::dead_letter`](crate::StateStore).
+    ///
+    /// A level, not the `alertthread_dead_letter_total` counter: the counter says how many
+    /// alerts stopped being delivered, this says how many are still sitting there unread.
+    pub dead_lettered: u64,
+    /// When the oldest queued row was enqueued, if anything is queued.
+    ///
+    /// `now - this` is `alertthread_outbox_oldest_age_seconds`, D11's primary SLO signal —
+    /// the one metric that means "alerts are not reaching Slack".
+    pub oldest_queued_at: Option<DateTime<Utc>>,
+    /// How many `alert_message` rows exist: `alertthread_tracked_fingerprints`.
+    pub tracked_fingerprints: u64,
+}
+
+/// How a storm-collapse group's members are currently split (ADR 001 D5).
+///
+/// Counted from `alert_message` rather than read off `group_message.member_count`, because
+/// the summary shows a **live** firing/resolved count and `member_count` only ever grows.
+/// A parent that said "9 of 15 firing" for ever, over a thread of green replies, is
+/// confidently wrong — which the renderer already treats as worse than uninformative.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GroupMembership {
+    /// Members that have not resolved.
+    pub firing: usize,
+    /// Members whose resolution has been accepted or delivered.
+    pub resolved: usize,
+}
+
+impl GroupMembership {
+    /// Every member, however it is doing.
+    pub const fn total(&self) -> usize {
+        self.firing + self.resolved
     }
 }
 

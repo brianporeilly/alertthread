@@ -41,6 +41,22 @@ pub enum OpKind {
 }
 
 impl OpKind {
+    /// Every kind of work an outbox row can hold.
+    ///
+    /// Exists so the Phase 4 sampler can publish `alertthread_outbox_depth{op}` for all six
+    /// labels on every sample. A gauge that simply stops being reported when its queue
+    /// empties reads as "no data" in Prometheus, not as "nothing pending", and the
+    /// difference between those two is the difference between a working relay and a dead
+    /// one.
+    pub const ALL: [Self; 6] = [
+        Self::Post,
+        Self::PostGroup,
+        Self::Refresh,
+        Self::RefreshGroup,
+        Self::Resolve,
+        Self::PostOrphanResolved,
+    ];
+
     /// The value stored in the `op` column, and the metric label that goes with it.
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -51,6 +67,15 @@ impl OpKind {
             Self::Resolve => "resolve",
             Self::PostOrphanResolved => "post_orphan_resolved",
         }
+    }
+
+    /// Reads an `op` column value, or `None` if it is not one of the six.
+    ///
+    /// `None` is a row this build cannot classify, which the caller reports rather than
+    /// folding into a neighbouring label — a depth gauge that quietly attributes unknown
+    /// work to `post` is worse than one that admits it does not know.
+    pub fn parse(raw: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == raw)
     }
 
     /// Which kind of work this op is.
@@ -531,6 +556,23 @@ mod tests {
         );
         assert_eq!(OpKind::PostGroup.to_string(), "post_group");
         assert_eq!(format!("{:?}", OpKind::Resolve), "Resolve");
+    }
+
+    #[test]
+    fn every_op_kind_round_trips_through_its_column_value() {
+        // The sampler reads this column back to label `alertthread_outbox_depth{op}`. A
+        // spelling that does not round-trip is queued work reported as unclassifiable.
+        for kind in OpKind::ALL {
+            assert_eq!(OpKind::parse(kind.as_str()), Some(kind), "{kind}");
+        }
+        assert_eq!(OpKind::ALL.len(), 6);
+    }
+
+    #[test]
+    fn a_value_that_is_not_an_op_kind_does_not_parse() {
+        for name in ["", "Post", "post_orphan", "send_carrier_pigeon"] {
+            assert_eq!(OpKind::parse(name), None, "{name}");
+        }
     }
 
     #[test]

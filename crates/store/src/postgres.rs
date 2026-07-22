@@ -32,13 +32,13 @@ use sqlx::{PgConnection, PgPool, Postgres};
 
 use crate::error::StoreError;
 use crate::model::{
-    AlertRecord, AlertState, ColumnDef, Deferral, GroupRecord, LeasedOp, OpEffect, OpId,
-    PruneStats, RetentionPolicy, WorkerId,
+    AlertRecord, AlertState, ColumnDef, Deferral, GroupMembership, GroupRecord, LeasedOp, OpEffect,
+    OpId, PruneStats, RetentionPolicy, StoreStats, WorkerId,
 };
 use crate::payload::{OpKind, StoredOp, channel_of, fingerprint_of, group_key_of};
 use crate::row::{
-    AlertRow, ClaimProbeRow, GroupDelta, GroupRow, OutboxRow, ResolveClaimRow, leased,
-    resolve_miss, stamp,
+    AlertRow, ClaimProbeRow, GroupDelta, GroupRow, OutboxRow, ResolveClaimRow, leased, membership,
+    resolve_miss, stamp, stats,
 };
 use crate::store::StateStore;
 
@@ -198,6 +198,22 @@ WHERE NOT EXISTS (
   AND NOT EXISTS (
       SELECT 1 FROM outbox o
       WHERE o.channel = group_message.channel AND o.group_key = group_message.group_key)";
+
+/// `SUM(CASE …)` rather than `COUNT(*) FILTER (WHERE …)`, which PostgreSQL has and SQLite
+/// does not. See the same statement in `sqlite.rs`.
+const COUNT_GROUP_MEMBERS: &str = "\
+SELECT COUNT(*),
+       SUM(CASE WHEN state IN ('resolving', 'resolved') THEN 1 ELSE 0 END)
+FROM alert_message WHERE group_key = $1 AND channel = $2";
+
+const OUTBOX_DEPTH: &str = "\
+SELECT op, COUNT(*), MIN(created_at)
+FROM outbox WHERE dead_lettered_at IS NULL
+GROUP BY op";
+
+const OUTBOX_DEAD_LETTERED: &str = "SELECT COUNT(*) FROM outbox WHERE dead_lettered_at IS NOT NULL";
+
+const COUNT_ALERTS: &str = "SELECT COUNT(*) FROM alert_message";
 
 const DESCRIBE_TABLE: &str = "\
 SELECT column_name, is_nullable = 'YES'
@@ -750,6 +766,35 @@ impl StateStore for PostgresStore {
             .await?;
 
         Ok(row.map(GroupRow::into_record))
+    }
+
+    async fn group_membership(
+        &self,
+        group_key: &GroupKey,
+        channel: &ChannelId,
+    ) -> Result<GroupMembership, StoreError> {
+        let (total, resolved): (i64, Option<i64>) = sqlx::query_as(COUNT_GROUP_MEMBERS)
+            .bind(group_key.as_str())
+            .bind(channel.as_str())
+            .fetch_one(&self.pool)
+            .await?;
+
+        Ok(membership(total, resolved))
+    }
+
+    async fn stats(&self) -> Result<StoreStats, StoreError> {
+        let mut txn = self.pool.begin().await?;
+
+        let depth: Vec<(String, i64, Option<DateTime<Utc>>)> =
+            sqlx::query_as(OUTBOX_DEPTH).fetch_all(&mut *txn).await?;
+        let (dead_lettered,): (i64,) = sqlx::query_as(OUTBOX_DEAD_LETTERED)
+            .fetch_one(&mut *txn)
+            .await?;
+        let (tracked,): (i64,) = sqlx::query_as(COUNT_ALERTS).fetch_one(&mut *txn).await?;
+
+        txn.commit().await?;
+
+        stats(depth, dead_lettered, tracked)
     }
 
     async fn describe_table(&self, table: &str) -> Result<Vec<ColumnDef>, StoreError> {

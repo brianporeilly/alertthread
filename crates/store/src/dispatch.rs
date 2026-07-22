@@ -28,8 +28,8 @@ use chrono::{DateTime, TimeDelta, Utc};
 
 use crate::error::StoreError;
 use crate::model::{
-    AlertRecord, ColumnDef, Deferral, GroupRecord, LeasedOp, OpEffect, OpId, PruneStats,
-    RetentionPolicy, WorkerId,
+    AlertRecord, ColumnDef, Deferral, GroupMembership, GroupRecord, LeasedOp, OpEffect, OpId,
+    PruneStats, RetentionPolicy, StoreStats, WorkerId,
 };
 use crate::store::StateStore;
 
@@ -221,6 +221,18 @@ impl StateStore for Store {
         channel: &ChannelId,
     ) -> Result<Option<GroupRecord>, StoreError> {
         forward!(self, s => s.group(group_key, channel))
+    }
+
+    async fn group_membership(
+        &self,
+        group_key: &GroupKey,
+        channel: &ChannelId,
+    ) -> Result<GroupMembership, StoreError> {
+        forward!(self, s => s.group_membership(group_key, channel))
+    }
+
+    async fn stats(&self) -> Result<StoreStats, StoreError> {
+        forward!(self, s => s.stats())
     }
 
     async fn describe_table(&self, table: &str) -> Result<Vec<ColumnDef>, StoreError> {

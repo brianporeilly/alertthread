@@ -8,8 +8,8 @@ use std::future::Future;
 
 use crate::error::StoreError;
 use crate::model::{
-    AlertRecord, ColumnDef, Deferral, GroupRecord, LeasedOp, OpEffect, OpId, PruneStats,
-    RetentionPolicy, WorkerId,
+    AlertRecord, ColumnDef, Deferral, GroupMembership, GroupRecord, LeasedOp, OpEffect, OpId,
+    PruneStats, RetentionPolicy, StoreStats, WorkerId,
 };
 
 /// Everything the relay does to its correlation and delivery state.
@@ -194,6 +194,43 @@ pub trait StateStore: Send + Sync {
         group_key: &GroupKey,
         channel: &ChannelId,
     ) -> impl Future<Output = Result<Option<GroupRecord>, StoreError>> + Send;
+
+    /// Counts a storm-collapse group's members by whether they have resolved (ADR 001 D5).
+    ///
+    /// The summary message shows a live firing/resolved count, and this is where it comes
+    /// from. It is counted from `alert_message` rather than read off
+    /// [`GroupRecord::member_count`], which only ever grows: a parent that kept saying
+    /// "9 of 15 firing" over a thread of green replies would be confidently wrong, and the
+    /// renderer already treats that as worse than uninformative.
+    ///
+    /// A group with no surviving members reports zero of each rather than an error. That is
+    /// a real state — the pruner deletes resolved alerts before it deletes their parent —
+    /// and the caller renders the count it is given.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Database`].
+    fn group_membership(
+        &self,
+        group_key: &GroupKey,
+        channel: &ChannelId,
+    ) -> impl Future<Output = Result<GroupMembership, StoreError>> + Send;
+
+    /// Samples everything ADR 001 D11 reports about the queue and the correlation state.
+    ///
+    /// One call rather than four, because a metrics sample should describe one moment: four
+    /// separate queries would let the depth and the oldest age come from different instants,
+    /// and the pair "depth 0, oldest age 40 s" is the kind of contradiction that costs
+    /// somebody twenty minutes at 3am.
+    ///
+    /// Called on a background interval, never from `GET /metrics`. A scrape every 15 s
+    /// across N replicas would otherwise point Prometheus at the outbox as a load generator,
+    /// and a slow store would time the scrape out and hide every other metric with it.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Database`].
+    fn stats(&self) -> impl Future<Output = Result<StoreStats, StoreError>> + Send;
 
     /// Reports the columns of `table`, sorted by name.
     ///
