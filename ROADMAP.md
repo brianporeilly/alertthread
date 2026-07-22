@@ -398,6 +398,16 @@ a `/still-firing` slash command.
    question of how a summary names itself had been asked. The column is write-once and the
    reasoning is recorded in both migrations and on `GroupRecord`; the ADR is not rewritten.
    Fold into ADR 003.
+8. **`just mutants` always exits non-zero, and therefore currently gates nothing.** Item 5's
+   survivor is judged equivalent, so it will never be killed — which means the recipe exits
+   2 on every run, forever, on a tree that is otherwise correct. AGENTS.md requires
+   "`just mutants`, no surviving mutants" for any change to `alertthread-core`, and as
+   written no one can satisfy it. This is the process note below turned inside out: a gate
+   that always fails trains people to ignore its exit code, and the next *genuinely* new
+   survivor rides in behind the one everybody has learned to wave through. **Fix before
+   Phase 4**, which touches core: exclude that one mutant by name with the equivalence
+   argument inline, so a non-zero exit means something again. Do not widen the exclusion to
+   the file or the function.
 
 ## Process notes worth keeping
 
