@@ -1,0 +1,110 @@
+<!doctype html>
+{#-
+  The fake Slack's browser face. Server-rendered, reloaded by a meta refresh —
+  no JavaScript, so there is nothing to build and nothing to debug in a console.
+-#}
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="{{ refresh }}">
+<title>slack-mock — alertthread</title>
+<style>
+  :root {
+    --bg: #1a1d21; --panel: #222529; --line: #35383d;
+    --ink: #d1d2d3; --dim: #9a9c9e; --accent: #4a9eff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 -apple-system, "Segoe UI", Lato, Helvetica, Arial, sans-serif;
+  }
+  header {
+    position: sticky; top: 0; background: var(--panel);
+    border-bottom: 1px solid var(--line); padding: 12px 20px;
+    display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap;
+  }
+  header h1 { font-size: 16px; margin: 0; }
+  header .meta { color: var(--dim); font-size: 13px; }
+  main { max-width: 940px; margin: 0 auto; padding: 20px; }
+  .channel { margin-bottom: 32px; }
+  .channel > h2 { font-size: 15px; margin: 0 0 4px; }
+  .channel > .id { color: var(--dim); font-size: 12px; margin-bottom: 12px; }
+  .msg { margin: 0 0 14px; }
+  .card {
+    border-left: 4px solid var(--line); background: var(--panel);
+    border-radius: 4px; padding: 10px 14px;
+  }
+  .card .body { white-space: normal; overflow-wrap: anywhere; }
+  .card code {
+    background: #2c2f33; border-radius: 3px; padding: 1px 4px;
+    font-size: 12px; color: #e8912d;
+  }
+  .card a { color: var(--accent); }
+  .card .stamp {
+    color: var(--dim); font-size: 12px; margin-top: 6px;
+    display: flex; gap: 10px; flex-wrap: wrap;
+  }
+  .edited { color: #e8912d; }
+  .thread {
+    margin: 8px 0 0 22px; padding-left: 14px;
+    border-left: 2px solid var(--line); list-style: none;
+  }
+  .thread > li { margin-top: 10px; }
+  .reply-to { color: var(--dim); font-size: 12px; }
+  .empty { color: var(--dim); padding: 40px 0; text-align: center; }
+</style>
+</head>
+<body>
+{#- Defined before use: a MiniJinja macro is only in scope after its definition. -#}
+{% macro card(message) -%}
+<div class="card" style="border-left-color: {{ message.color or '#35383d' }}">
+  <div class="body">
+    {%- for block in message.blocks %}<div>{{ block | mrkdwn }}</div>{% endfor %}
+    {%- if not message.blocks %}<div>{{ message.text | mrkdwn }}</div>{% endif %}
+  </div>
+  <div class="stamp">
+    <span>{{ message.ts }}</span>
+    <span>{{ message.posted_at }}</span>
+    {%- if message.edited %}
+    <span class="edited">edited {{ message.edits }}× at {{ message.updated_at }}</span>
+    {%- endif %}
+  </div>
+</div>
+{%- endmacro %}
+<header>
+  <h1>slack-mock</h1>
+  <span class="meta">{{ workspace.message_count }} message(s) ·
+    reloads every {{ refresh }}s · {{ generated_at }}</span>
+  <span class="meta"><a href="/api/state" style="color:#4a9eff">/api/state</a></span>
+</header>
+<main>
+{%- if not workspace.channels %}
+  <p class="empty">Nothing posted yet. Waiting for the relay.</p>
+{%- endif %}
+{%- for channel in workspace.channels %}
+  <section class="channel">
+    <h2>{{ channel.name }}</h2>
+    <div class="id">{{ channel.id }} · {{ channel.message_count }} message(s)</div>
+    {%- for message in channel.messages %}
+    <div class="msg">
+      {{ card(message=message) }}
+      {%- if message.replies %}
+      <ul class="thread">
+        {%- for reply in message.replies %}
+        <li>
+          {%- if reply.reply_to and reply.reply_to != message.ts %}
+          <div class="reply-to">in reply to {{ reply.reply_to }}</div>
+          {%- endif %}
+          {{ card(message=reply) }}
+        </li>
+        {%- endfor %}
+      </ul>
+      {%- endif %}
+    </div>
+    {%- endfor %}
+  </section>
+{%- endfor %}
+</main>
+</body>
+</html>

@@ -11,6 +11,16 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+axum.workspace = true
+# `clock` is enabled here for the same reason it is in the app: this is a shell,
+# and reading a wall clock is its job. The core's ban is unaffected.
+chrono = { workspace = true, features = ["clock"] }
+minijinja.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true
