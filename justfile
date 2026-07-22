@@ -41,6 +41,36 @@ llvm_cov_json := coverage_dir / "llvm-cov.json"
 # not have run. Rationale in full: scripts/coverage-gate.py.
 pg_cov_json := coverage_dir / "llvm-cov-postgres.json"
 
+# ...and it builds into its own target directory, which is load-bearing.
+#
+# cargo-llvm-cov reports over every instrumented object it finds in the target
+# directory, not only the ones the current invocation built. Sharing one
+# directory between the two profiles therefore lets a *previous* run's artifacts
+# into this run's report.
+#
+# Concretely, and this was observed rather than theorised: `just ci` builds the
+# workspace with default features, which links the SQLite backend into the app's
+# integration tests. `just test-pg` then builds `--no-default-features
+# -F postgres` — and sqlite.rs, a backend that build does not contain, turns up
+# in the report at exactly 0.0%, dragging `alertthread-store` from 99.2% to
+# 75.1% and failing a gate on code the run was never asked about.
+#
+# That is precisely the contamination the feature split above exists to prevent,
+# arriving by the back door. Two things make it worth a separate directory
+# rather than a `cargo llvm-cov clean`:
+#
+#   * It fails in both directions. Leftover coverage can as easily make a gate
+#     *pass* that should have failed, and that failure is silent.
+#   * CI never sees it. CI runs `test` and `test-pg` as separate jobs with clean
+#     target directories, so the gate is green there and red locally — the worst
+#     shape a gate can have, because it teaches people the local failure is
+#     noise.
+#
+# A separate directory also beats cleaning on cost: each profile keeps its own
+# build cache, so alternating between the two recipes does not force a full
+# instrumented rebuild every time.
+pg_target_dir := justfile_directory() / "target" / "llvm-cov-pg"
+
 # main.rs is wiring and signal handling; slack-mock is dev tooling, not shipped.
 # Both exclusions are policy, stated in ROADMAP.md, and enforced identically by
 # the gate script — this regex only keeps them out of the HTML report too.
@@ -106,6 +136,10 @@ test-pg: check-engine
         exit 1
     fi
     mkdir -p {{ coverage_dir }}
+    # Its own target directory, so this report cannot inherit instrumented
+    # objects from a `just test` or `just ci` that ran before it. See
+    # `pg_target_dir` above for what that looked like when it was shared.
+    export CARGO_TARGET_DIR="{{ pg_target_dir }}"
     # --no-default-features drops the SQLite backend from this build. That is
     # what makes the gate below meaningful: it measures PostgreSQL against the
     # tests that just ran, rather than against a SQLite backend whose tests ran
