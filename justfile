@@ -210,7 +210,13 @@ check-engine:
 [private]
 image TAG="localhost/alertthread:dev": check-engine
     {{ engine }} build -t {{ TAG }} .
-    {{ engine }} run --rm {{ TAG }}
+    # --version, because the relay refuses to start without a Slack token (D8) and this
+    # check is about whether the static binary executes on `scratch` at all.
+    {{ engine }} run --rm {{ TAG }} --version
+    # And that the refusal is a clean non-zero rather than a hang or a panic.
+    @if {{ engine }} run --rm {{ TAG }} 2>/dev/null; then \
+        echo "expected the relay to refuse to start with no token" >&2; exit 1; \
+    fi
     @{{ engine }} images {{ TAG }}
 
 # ---------------------------------------------------------------------------

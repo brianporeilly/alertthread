@@ -12,6 +12,14 @@
 use alertthread::run;
 
 fn main() -> std::process::ExitCode {
+    // Before tracing and before the runtime: `--version` has to work on a `scratch` image
+    // with no configuration, because proving the static binary executes is what the image
+    // smoke test is for.
+    if run::wants_version(std::env::args()) {
+        println!("{}", alertthread::build_identity());
+        return std::process::ExitCode::SUCCESS;
+    }
+
     run::init_tracing();
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()

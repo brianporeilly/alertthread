@@ -296,6 +296,16 @@ pub fn config_path(mut args: impl Iterator<Item = String>) -> Option<std::path::
     })
 }
 
+/// Whether the command line asks for the version instead of a run.
+///
+/// Kept out of `main.rs` so it is testable, and out of `config_path` so that a file
+/// literally named `--version` is still a path rather than a surprise.
+pub fn wants_version(args: impl IntoIterator<Item = String>) -> bool {
+    args.into_iter()
+        .skip(1)
+        .any(|arg| arg == "--version" || arg == "-V")
+}
+
 /// Sets up structured logging.
 ///
 /// JSON to stdout when `ALERTTHREAD_LOG_FORMAT=json`, human-readable otherwise. JSON is not
@@ -435,6 +445,21 @@ slack:
         // stopped draining it.
         let id = worker_id();
         assert!(!id.as_str().is_empty());
+    }
+
+    #[test]
+    fn the_version_flag_is_recognised_and_nothing_else_is() {
+        let args = |rest: &[&str]| {
+            std::iter::once("alertthread".to_owned())
+                .chain(rest.iter().map(|s| (*s).to_owned()))
+                .collect::<Vec<_>>()
+        };
+        assert!(super::wants_version(args(&["--version"])));
+        assert!(super::wants_version(args(&["-V"])));
+        assert!(!super::wants_version(args(&[])));
+        assert!(!super::wants_version(args(&["/etc/alertthread.yaml"])));
+        // argv[0] is skipped, so a binary at a path spelled like the flag still serves.
+        assert!(!super::wants_version(vec!["--version".to_owned()]));
     }
 
     #[test]
