@@ -26,8 +26,8 @@ use chrono::TimeDelta;
 use figment::Figment;
 use figment::providers::{Format, Serialized, Yaml};
 use harness::{Harness, alert, payload, slack_error, slack_that_works, sqlite_url};
+use wiremock::Mock;
 use wiremock::matchers::{method, path};
-use wiremock::{Mock, ResponseTemplate};
 
 /// A configuration pointed at `slack` and at a database named after the test.
 fn config(name: &str, slack_uri: &str) -> Config {

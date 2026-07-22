@@ -149,6 +149,7 @@ pub struct Harness {
 
 impl Harness {
     /// Builds a relay against `slack`, storing state in a database named after the test.
+    #[must_use = "the harness owns the store; dropping it closes the pool"]
     pub async fn new(name: &str, slack: &MockServer) -> Self {
         Self::with_config(name, slack, "").await
     }
@@ -336,4 +337,130 @@ pub fn alert(fingerprint: &str, status: &str) -> serde_json::Value {
         "generatorURL": "http://prometheus/graph",
         "fingerprint": fingerprint,
     })
+}
+
+/// A store that answers the readiness probe slowly, and everything else normally.
+///
+/// Exists because `server.request_timeout` protects against *a store that has stopped
+/// answering*, and that is not a state the shipping store can be argued into: an unmigrated
+/// database fails fast, and a broken socket fails faster. Neither of them holds the request
+/// open, which is the only condition the timeout layer reacts to.
+///
+/// It delegates every method to a real [`Store`] and stalls only in
+/// [`alert`](StateStore::alert), which is what `/readyz` awaits. A wrapper rather than a
+/// hand-written fake so that the test still exercises the shipping SQL underneath the delay
+/// — the point is a slow store, not an absent one.
+pub struct SlowStore {
+    inner: Store,
+    delay: std::time::Duration,
+}
+
+impl SlowStore {
+    #[must_use]
+    pub fn new(inner: Store, delay: std::time::Duration) -> Self {
+        Self { inner, delay }
+    }
+}
+
+impl StateStore for SlowStore {
+    async fn migrate(&self) -> Result<(), alertthread_store::StoreError> {
+        self.inner.migrate().await
+    }
+
+    async fn ingest<F>(
+        &self,
+        batch: &alertthread_core::AlertBatch,
+        now: DateTime<Utc>,
+        decide: F,
+    ) -> Result<alertthread_core::Plan, alertthread_store::StoreError>
+    where
+        F: FnOnce(
+                &[alertthread_core::ClaimOutcome],
+                Option<&alertthread_core::GroupState>,
+            ) -> alertthread_core::Plan
+            + Send,
+    {
+        self.inner.ingest(batch, now, decide).await
+    }
+
+    async fn lease_batch(
+        &self,
+        worker: &WorkerId,
+        limit: u32,
+        lease: TimeDelta,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<alertthread_store::LeasedOp>, alertthread_store::StoreError> {
+        self.inner.lease_batch(worker, limit, lease, now).await
+    }
+
+    async fn complete(
+        &self,
+        id: alertthread_store::OpId,
+        effect: &alertthread_store::OpEffect,
+        now: DateTime<Utc>,
+    ) -> Result<(), alertthread_store::StoreError> {
+        self.inner.complete(id, effect, now).await
+    }
+
+    async fn defer(
+        &self,
+        id: alertthread_store::OpId,
+        deferral: &alertthread_store::Deferral,
+    ) -> Result<(), alertthread_store::StoreError> {
+        self.inner.defer(id, deferral).await
+    }
+
+    async fn dead_letter(
+        &self,
+        id: alertthread_store::OpId,
+        reason: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(), alertthread_store::StoreError> {
+        self.inner.dead_letter(id, reason, now).await
+    }
+
+    async fn prune(
+        &self,
+        policy: &alertthread_store::RetentionPolicy,
+        now: DateTime<Utc>,
+    ) -> Result<alertthread_store::PruneStats, alertthread_store::StoreError> {
+        self.inner.prune(policy, now).await
+    }
+
+    async fn alert(
+        &self,
+        fingerprint: &alertthread_core::Fingerprint,
+        channel: &alertthread_core::ChannelId,
+    ) -> Result<Option<alertthread_store::AlertRecord>, alertthread_store::StoreError> {
+        // The stall, and the whole reason this type exists.
+        tokio::time::sleep(self.delay).await;
+        self.inner.alert(fingerprint, channel).await
+    }
+
+    async fn group(
+        &self,
+        group_key: &alertthread_core::GroupKey,
+        channel: &alertthread_core::ChannelId,
+    ) -> Result<Option<alertthread_store::GroupRecord>, alertthread_store::StoreError> {
+        self.inner.group(group_key, channel).await
+    }
+
+    async fn group_membership(
+        &self,
+        group_key: &alertthread_core::GroupKey,
+        channel: &alertthread_core::ChannelId,
+    ) -> Result<alertthread_store::GroupMembership, alertthread_store::StoreError> {
+        self.inner.group_membership(group_key, channel).await
+    }
+
+    async fn stats(&self) -> Result<alertthread_store::StoreStats, alertthread_store::StoreError> {
+        self.inner.stats().await
+    }
+
+    async fn describe_table(
+        &self,
+        table: &str,
+    ) -> Result<Vec<alertthread_store::ColumnDef>, alertthread_store::StoreError> {
+        self.inner.describe_table(table).await
+    }
 }

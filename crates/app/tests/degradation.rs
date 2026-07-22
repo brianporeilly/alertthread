@@ -493,9 +493,10 @@ async fn a_summary_refresh_renders_the_live_count_from_the_store() {
         .await
         .unwrap()
         .iter()
+        .rev()
         .filter(|r| r.url.path() == "/api/chat.update")
         .map(|r| serde_json::from_slice(&r.body).unwrap())
-        .next_back()
+        .next()
         .expect("the summary was edited");
     assert!(
         edit.to_string().contains("6 of 6"),
@@ -628,9 +629,10 @@ async fn a_refresh_for_an_alert_that_has_resolved_renders_it_resolved() {
         .await
         .unwrap()
         .iter()
+        .rev()
         .filter(|r| r.url.path() == "/api/chat.update")
         .map(|r| serde_json::from_slice(&r.body).unwrap())
-        .next_back()
+        .next()
         .unwrap();
     assert_eq!(edit["attachments"][0]["color"], "#2eb886", "{edit}");
 }

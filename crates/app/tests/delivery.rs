@@ -107,8 +107,7 @@ async fn a_resolution_edits_the_message_in_place_and_replies_in_thread() {
     // would put back the channel noise that threading removed.
     let reply: serde_json::Value = calls
         .iter()
-        .filter(|r| r.url.path() == "/api/chat.postMessage")
-        .last()
+        .rfind(|r| r.url.path() == "/api/chat.postMessage")
         .map(|r| serde_json::from_slice(&r.body).unwrap())
         .unwrap();
     assert!(reply.get("thread_ts").is_some(), "{reply}");

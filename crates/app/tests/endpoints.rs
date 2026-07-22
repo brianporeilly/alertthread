@@ -462,3 +462,83 @@ async fn an_alert_with_a_status_nobody_recognises_is_accepted_and_treated_as_fir
     assert_eq!(record.state, alertthread_store::AlertState::Claimed);
     server.stop().await;
 }
+
+#[tokio::test]
+async fn a_request_that_outlives_its_budget_is_answered_with_a_retryable_status() {
+    // `server.request_timeout` protects against a store that has stopped answering. The
+    // right outcome then is a fast failure Alertmanager retries, not a socket held open
+    // until something upstream gives up — so `503`, not tower-http's default `408`, which
+    // says the *client* was too slow and is both untrue and the wrong hint for the thing
+    // that decides whether the alert is redelivered.
+    let slack = slack_that_works().await;
+    let relay = Harness::new("endpoints-timeout", &slack).await;
+
+    // A store that answers, but not in time. `/readyz` awaits `alert()`, so this is the
+    // real shape of the failure the layer exists for — a store that has stopped answering
+    // rather than one that has failed, which fails fast and never holds the request open.
+    //
+    // Note the budget must be exceeded at an *await point*: the timeout is only observed
+    // when the inner service yields, so a handler that returns without ever awaiting is
+    // never over budget however small the budget is. `/healthz` is exactly that handler,
+    // which is why this test does not use it.
+    let slow = harness::SlowStore::new(
+        alertthread_store::Store::connect(
+            alertthread_store::Backend::Sqlite,
+            &harness::sqlite_url("endpoints-timeout-slow"),
+        )
+        .await
+        .expect("opening the slow store"),
+        // Far longer than the budget, but bounded: if the layer ever stopped dropping the
+        // timed-out future, this test should fail slowly rather than hang the suite.
+        std::time::Duration::from_secs(5),
+    );
+    slow.migrate().await.expect("migrating the slow store");
+
+    let mut state = alertthread::http::AppState::new(
+        std::sync::Arc::new(slow),
+        std::sync::Arc::clone(&relay.metrics),
+        &relay.config,
+    );
+    state.request_timeout = std::time::Duration::from_millis(50);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (source, token) = alertthread::shutdown::cancellation();
+    let handle = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            alertthread::http::router(std::sync::Arc::new(state)),
+        )
+        .with_graceful_shutdown(async move { token.cancelled().await })
+        .await
+        .unwrap();
+    });
+
+    let response = reqwest::get(format!("http://{addr}/readyz")).await.unwrap();
+    assert_eq!(
+        response.status(),
+        503,
+        "a store that has stopped answering is a 503 Alertmanager will retry, not a 408 \
+         blaming the client"
+    );
+
+    source.cancel();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_request_timeout_that_will_not_convert_falls_back_rather_than_refusing_alerts() {
+    // A negative duration in a ConfigMap must not be able to stop the relay accepting
+    // alerts. An over-long timeout is a slow request; a relay that would not start is
+    // silence.
+    let slack = slack_that_works().await;
+    let mut relay = Harness::new("endpoints-badtimeout", &slack).await;
+    relay.config.server.request_timeout = chrono::TimeDelta::seconds(-5);
+
+    let state = alertthread::http::AppState::new(
+        std::sync::Arc::clone(&relay.store),
+        std::sync::Arc::clone(&relay.metrics),
+        &relay.config,
+    );
+    assert_eq!(state.request_timeout, std::time::Duration::from_secs(15));
+}

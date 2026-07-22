@@ -46,6 +46,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use chrono::Utc;
 use serde::Deserialize;
+use tower_http::timeout::TimeoutLayer;
+use tower_http::trace::TraceLayer;
 
 use crate::config::Config;
 use crate::metrics::Metrics;
@@ -60,6 +62,12 @@ pub struct AppState<S: StateStore> {
     pub policy: Policy,
     /// Where to post when the URL carries no `?channel=` (ADR 001 D8).
     pub default_channel: Option<ChannelId>,
+    /// How long a request may take before the server abandons it.
+    ///
+    /// Held here rather than passed to [`router`] separately so there is one place a
+    /// handler's budget comes from, and so a `Config` cannot be wired up with the timeout
+    /// left behind.
+    pub request_timeout: std::time::Duration,
 }
 
 impl<S: StateStore> AppState<S> {
@@ -71,9 +79,21 @@ impl<S: StateStore> AppState<S> {
             metrics,
             policy: config.policy(),
             default_channel: config.default_channel(),
+            // A negative or absurd `request_timeout` falls back to the default rather than
+            // being rejected: a configuration mistake must not stop the relay from
+            // accepting alerts, and an over-long timeout is a slow request rather than a
+            // lost one.
+            request_timeout: config
+                .server
+                .request_timeout
+                .to_std()
+                .unwrap_or(DEFAULT_REQUEST_TIMEOUT),
         }
     }
 }
+
+/// The request budget used when `server.request_timeout` will not convert.
+const DEFAULT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// The `?channel=` parameter of ADR 001 D8.
 #[derive(Debug, Deserialize)]
@@ -89,12 +109,34 @@ pub struct WebhookQuery {
 /// The state is `Arc`-shared rather than cloned per request: `AppState` holds the store,
 /// and cloning a connection pool per webhook would be the one avoidable allocation on a
 /// path with a 50 ms budget.
+///
+/// # The two layers
+///
+/// [`TimeoutLayer`] applies `server.request_timeout`. What it protects against is a store
+/// that has stopped answering: the right outcome then is a fast failure Alertmanager
+/// retries, not a socket held open until something upstream gives up. It sits *outside*
+/// the handlers, so a timed-out webhook has still either committed its transaction or not —
+/// the store's atomicity is what decides that, not who was still holding the socket.
+///
+/// [`TraceLayer`] gives every request a span. `alertthread_outbox_oldest_age_seconds` says
+/// alerts are not reaching Slack; the access log is what says whether they are reaching
+/// *us*, and the two questions get asked in that order.
 pub fn router<S: StateStore + 'static>(state: Arc<AppState<S>>) -> Router {
+    let timeout = state.request_timeout;
     Router::new()
         .route("/webhook", post(webhook::<S>))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz::<S>))
         .route("/metrics", get(metrics::<S>))
+        // `with_status_code` rather than the deprecated `new`, and `503` rather than
+        // tower-http's `408`. Alertmanager's webhook client retries a `503`; `408 Request
+        // Timeout` says the *client* was too slow, which is both untrue and the wrong hint
+        // for the thing that will decide whether the alert is redelivered.
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::SERVICE_UNAVAILABLE,
+            timeout,
+        ))
+        .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
 

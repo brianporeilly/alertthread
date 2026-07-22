@@ -44,7 +44,7 @@ impl std::fmt::Debug for Relay {
         f.debug_struct("Relay")
             .field("addr", &self.addr)
             .field("tasks", &self.tasks.len())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
