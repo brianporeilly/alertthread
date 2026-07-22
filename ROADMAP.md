@@ -19,7 +19,7 @@ project up will read, and git log does not distinguish "in review" from "abandon
 | 0 — Foundations | ✅ merged (#3) |
 | 1 — Pure core | ✅ merged (#4) |
 | 2 — Store layer | ✅ merged (#5) |
-| 3 — Slack layer | 🔵 in review (#7) |
+| 3 — Slack layer | ✅ merged (#7) |
 | ↳ group labels | ✅ built — `group_message.group_labels`, both backends |
 | **4 — Wiring** | ⬜ **not started — next** |
 | 5 — Hardening | ⬜ not started |
