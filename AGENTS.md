@@ -147,6 +147,14 @@ merged until it appears in `reference/configuration.md`. A new metric is not mer
 it appears in `reference/metrics.md`. State in the PR description which quadrant you
 touched and why.
 
+### Comments
+
+**Reasoning goes in the PR and the commit message, not in the file.** What was tried, what
+broke, why this over that — a reader who wants it can find it; a reader who does not should
+not have to scroll past it. Comment only what the code cannot say itself, and keep it to a
+line. The exception is narrow and deliberate: where a comment is the only thing stopping
+someone from "simplifying" a load-bearing choice into a bug.
+
 ### ADRs
 
 ADRs live in `docs/src/adr/`. "Append-only" protects **decisions**, not every character:
@@ -239,7 +247,7 @@ Real ones, discovered the hard way. Each has cost somebody time.
 3. Changes to `alertthread-core` leave no surviving mutants.
 4. Docs updated in the correct quadrant.
 5. No new path can result in an alert going unposted.
-6. Public items have doc comments; anything non-obvious says *why*.
+6. Public items have doc comments.
 7. New config appears in `reference/configuration.md`; new metrics in
    `reference/metrics.md`.
 

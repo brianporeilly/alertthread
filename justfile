@@ -6,22 +6,11 @@
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
-# Container engine for the dev stack and image builds.
+# Container engine for the dev stack and image builds. Detected, not hardcoded.
 #
-# Detected rather than hardcoded: this is not a podman-only project. Whichever
-# engine you have, the recipes work unchanged — which is what lets CI run these
-# same recipes on a Docker-only GitHub runner instead of installing podman to
-# satisfy them.
-#
-# The order is only a tie-break for machines that have both, and it favours
-# docker because docker's Compose v2 is a self-contained plugin, whereas
-# `podman compose` delegates to an external provider that then needs podman's
-# API socket listening. Preferring docker means the tie-break lands on the one
-# that works with no further setup.
-#
-# GitHub runners are exactly this case: they ship podman *and* docker, with
-# podman's socket inactive. Preferring podman there picks an engine whose
-# compose cannot connect — which is precisely how this was found.
+# Docker wins the tie-break because its Compose v2 is self-contained, whereas
+# `podman compose` needs podman's API socket listening — which on a GitHub
+# runner, where both are installed, it is not.
 #
 # Force either one with CONTAINER_ENGINE=podman (or =docker).
 engine := env_var_or_default("CONTAINER_ENGINE", `command -v docker >/dev/null 2>&1 && echo docker || echo podman`)
@@ -31,19 +20,17 @@ compose := engine + " compose"
 coverage_dir := justfile_directory() / "coverage"
 llvm_cov_json := coverage_dir / "llvm-cov.json"
 
-# The PostgreSQL backend is measured by its own run, into its own file.
-#
-# `alertthread-store` has two backends behind cargo features and no single build
-# can run the tests for both: `just test` has no containers. So `just test`
-# compiles SQLite only and `just test-pg` compiles PostgreSQL only, and each is
-# gated at the same 95% threshold against the code it actually compiled. Neither
-# backend is left unmeasured, and neither is measured against tests that could
-# not have run. Rationale in full: scripts/coverage-gate.py.
+# Each backend is gated by the run that can exercise it. See ROADMAP.md's
+# coverage policy.
 pg_cov_json := coverage_dir / "llvm-cov-postgres.json"
 
-# main.rs is wiring and signal handling; slack-mock is dev tooling, not shipped.
-# Both exclusions are policy, stated in ROADMAP.md, and enforced identically by
-# the gate script — this regex only keeps them out of the HTML report too.
+# Its own target directory: cargo-llvm-cov reports over every instrumented
+# object it finds, so sharing one with `just test` lets that profile's SQLite
+# build into this profile's report and fails the gate on code this build does
+# not contain.
+pg_target_dir := justfile_directory() / "target" / "llvm-cov-pg"
+
+# Policy, stated in ROADMAP.md; the gate script enforces it independently.
 ignore_regex := '(crates/app/src/main\.rs|dev/slack-mock/)'
 
 [private]
@@ -106,10 +93,9 @@ test-pg: check-engine
         exit 1
     fi
     mkdir -p {{ coverage_dir }}
-    # --no-default-features drops the SQLite backend from this build. That is
-    # what makes the gate below meaningful: it measures PostgreSQL against the
-    # tests that just ran, rather than against a SQLite backend whose tests ran
-    # in a different invocation.
+    export CARGO_TARGET_DIR="{{ pg_target_dir }}"
+    # --no-default-features drops the SQLite backend, so this measures
+    # PostgreSQL against the tests that just ran.
     cargo llvm-cov --package alertthread-store \
         --no-default-features --features postgres \
         --ignore-filename-regex '{{ ignore_regex }}' \
@@ -126,53 +112,13 @@ coverage:
         nextest
     @echo "Report: {{ coverage_dir }}/html/index.html"
 
-# Coverage proves a line ran; it does not prove a test would have caught the
-# regression. For a system whose worst failure is silence, "would we have
-# noticed?" is the question that matters, and this is the tool that answers it.
-#
 # Mutation testing. Required for any change to alertthread-core.
 mutants *ARGS:
-    # No --in-place: cargo-mutants copies the tree to a scratch directory by
-    # default, so the working tree is never left holding a mutated source file
-    # if a run is interrupted. `--in-place` is the opt-out and takes no value.
+    # postgres.rs is not compiled by this build, so every mutant in it would
+    # report as a survivor; `just mutants-pg` tests it instead.
     #
-    # postgres.rs is excluded here for the same reason the coverage gate is
-    # split: this run builds with default features, where that file is not
-    # compiled at all. A mutant in code the build does not contain cannot be
-    # caught by any test, so every one of them reports as a survivor — 41 of
-    # them, drowning the handful that would mean something. `just mutants-pg`
-    # is where they are actually tested.
-    #
-    # --test-tool nextest so mutants are judged by the same runner as `just
-    # test`. It also gives each test its own process, which matters for the
-    # store: `#[sqlx::test]` keeps a per-process connection pool, and a mutant
-    # that wedges one test should not slow the rest of the suite down with it.
-    #
-    # --exclude-re suppresses exactly one mutant, which is genuinely equivalent
-    # on this backend and therefore cannot be killed by any test worth writing:
-    #
-    #     if inserted.rows_affected() > 0 { return Ok(true); }
-    #
-    # `rows_affected()` is unsigned, so `>= 0` is a tautology and the mutant
-    # makes the function always report that it opened the group. That is
-    # unobservable *here* because the fall-through below it is unreachable on
-    # SQLite: `BEGIN IMMEDIATE` serialises the two ingests, so a transaction
-    # that planned a `PostGroup` always wins the insert. The same line is
-    # reachable on PostgreSQL, where the conformance suite covers it.
-    #
-    # It is excluded by name rather than by line, because the line moves
-    # whenever anything above it does — ROADMAP known open item #5 was already
-    # rediscovered once that way. It is excluded as one mutant rather than with
-    # `#[mutants::skip]` on the function or an `--exclude` on the file: the
-    # other two mutants at the same site, `> with ==` and `> with <`, are both
-    # caught, and widening this to hide them would trade one honest exception
-    # for a blind spot in the code that decides whether a storm produces one
-    # summary or one per replica.
-    #
-    # Without it this recipe exits non-zero on a correct tree, which is worse
-    # than useless: AGENTS.md requires a clean run for every change to
-    # `alertthread-core`, and a gate that rejects everything trains people to
-    # ignore its exit code until the next real survivor rides in behind it.
+    # --exclude-re suppresses one equivalent mutant, by name because the line
+    # moves. ROADMAP known open item #5 carries the argument.
     cargo mutants --workspace --test-tool nextest \
         --exclude 'crates/store/src/postgres.rs' \
         --exclude-re 'replace > with >= in persist_group' {{ ARGS }}
