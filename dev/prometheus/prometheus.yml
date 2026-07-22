@@ -1,0 +1,24 @@
+# Prometheus for the local end-to-end demo. Real Prometheus, evaluating a real
+# rule — not a script posting captured JSON — because D8's footguns are only
+# exercised by the genuine article (ROADMAP Phase 4, spec decision 1).
+#
+# Intervals are short so the demo moves at human-watchable speed; nothing here
+# is tuned for anything but a laptop.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+rule_files:
+  - /etc/prometheus/rules.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  # Prometheus scrapes itself: the demo rule gates on how long this process has
+  # been up, so it needs `process_start_time_seconds` about itself.
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

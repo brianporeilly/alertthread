@@ -100,7 +100,9 @@ fn inline(text: &str) -> String {
             out.push_str("</");
             out.push_str(tag);
             out.push('>');
-            rest = after.get(close + delimiter.len_utf8()..).unwrap_or_default();
+            rest = after
+                .get(close + delimiter.len_utf8()..)
+                .unwrap_or_default();
         } else {
             // An unpaired delimiter is literal text, not the start of a tag that
             // never closes.

@@ -302,7 +302,10 @@ impl Workspace {
                     .find(|message| message.ts == requested)
             })
             .ok_or::<ApiError>("thread_not_found")?;
-        Ok(parent.thread_ts.clone().unwrap_or_else(|| parent.ts.clone()))
+        Ok(parent
+            .thread_ts
+            .clone()
+            .unwrap_or_else(|| parent.ts.clone()))
     }
 
     /// The next `seconds.microseconds` timestamp, unique and increasing.
@@ -589,9 +592,7 @@ mod tests {
             ]"#,
         )
         .expect("the blocks parse");
-        workspace
-            .post(&request, now())
-            .expect("the post succeeds");
+        workspace.post(&request, now()).expect("the post succeeds");
 
         let view = workspace.view();
         assert_eq!(
