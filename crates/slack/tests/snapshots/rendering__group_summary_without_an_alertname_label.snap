@@ -1,0 +1,22 @@
+---
+source: crates/slack/tests/rendering.rs
+expression: snapshot_of(&rendered)
+---
+{
+  "attachments": [
+    {
+      "blocks": [
+        {
+          "text": {
+            "text": "*:rotating_light: FIRING · 4 of 4 alerts* · namespace=rook-ceph severity=critical\n\n_Alertmanager group_ `{}/{}:{namespace=\"rook-ceph\", severity=\"critical\"}`\n_Each alert is threaded under this message and updated there as it resolves._",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        }
+      ],
+      "color": "#d40e0d",
+      "fallback": ":rotating_light: FIRING · 4 of 4 alerts · namespace=rook-ceph severity=critical"
+    }
+  ],
+  "text": ":rotating_light: FIRING · 4 of 4 alerts · namespace=rook-ceph severity=critical"
+}

@@ -84,6 +84,13 @@ impl AlertView {
 pub struct GroupView {
     /// Alertmanager's key for the group.
     pub group_key: GroupKey,
+    /// The labels Alertmanager grouped on, read from the `group_message` row.
+    ///
+    /// Structural, and therefore the only honest way to name a group. What this replaced
+    /// was a parse of `alertname="…"` out of [`group_key`](Self::group_key), which depended
+    /// on Alertmanager's internal serialisation and produced nothing at all when
+    /// `alertname` was not in the operator's `group_by`.
+    pub labels: LabelMap,
     /// How many of its members are still firing.
     pub firing: usize,
     /// How many have resolved.
@@ -102,31 +109,6 @@ impl GroupView {
     /// underneath it is green is worse than no summary, because it is confidently wrong.
     pub const fn all_resolved(&self) -> bool {
         self.firing == 0
-    }
-}
-
-/// Best-effort alert name for a group, read out of Alertmanager's `groupKey`.
-///
-/// The `group_message` table has no room for labels — ADR 001 D4's schema predates the
-/// question — and neither `Op::PostGroup` nor `Op::RefreshGroup` carries any. The key
-/// itself is the only thing a summary has to work with, and it looks like:
-///
-/// ```text
-/// {}/{severity="critical"}:{alertname="KubePodNotReady", job="kubelet"}
-/// ```
-///
-/// So this reads the `alertname="…"` pair out of it and returns `None` when there is not
-/// one. Best-effort by construction: the key's format is Alertmanager's business, and a
-/// summary that falls back to showing the raw key is degraded, not broken.
-fn alertname_from_group_key(key: &GroupKey) -> Option<String> {
-    const NEEDLE: &str = "alertname=\"";
-    let raw = key.as_str();
-    let after = raw.split_once(NEEDLE)?.1;
-    let (name, _) = after.split_once('"')?;
-    if name.is_empty() {
-        None
-    } else {
-        Some(name.to_owned())
     }
 }
 
@@ -366,11 +348,50 @@ impl AlertVars {
     }
 }
 
+/// A heading for a group, from the labels Alertmanager grouped on.
+///
+/// Never empty — a summary headed by nothing is unusable, and this is the most-read
+/// message of a storm. Four steps, in order:
+///
+/// 1. `alertname`, when it is one of the group's labels. Reading `alertname` out of a real
+///    label map is legitimate; it is a documented Alertmanager label. What this replaced
+///    was reading it out of the group *key*, which is a serialisation format.
+/// 2. Otherwise the label pairs, `k=v`, space-separated. This is the fix for the case that
+///    prompted the change: a `group_by` of `namespace, severity` used to produce a blank
+///    heading, and now produces one naming what it grouped by.
+/// 3. Otherwise the group key, which is what `group_by: []` leaves us with.
+/// 4. Otherwise a placeholder, because steps 1–3 can all be empty and a blank heading is
+///    the outcome this whole function exists to prevent.
+///
+/// Takes the already-escaped map so the heading cannot be the one place unescaped label
+/// text reaches a message.
+fn group_title(labels: &BTreeMap<String, String>, group_key: &str) -> String {
+    if let Some(alertname) = labels.get("alertname")
+        && !alertname.is_empty()
+    {
+        return alertname.clone();
+    }
+
+    if !labels.is_empty() {
+        return labels
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+
+    if group_key.is_empty() {
+        return "(unnamed group)".to_owned();
+    }
+    group_key.to_owned()
+}
+
 /// The variables a `group_summary` template receives.
 #[derive(Debug, Serialize)]
 pub(crate) struct GroupVars {
     group_key: String,
-    alertname: String,
+    labels: BTreeMap<String, String>,
+    title: String,
     firing: usize,
     resolved: usize,
     total: usize,
@@ -379,11 +400,12 @@ pub(crate) struct GroupVars {
 
 impl GroupVars {
     pub(crate) fn build(view: &GroupView) -> Self {
+        let group_key = escape(view.group_key.as_str());
+        let labels = escape_map(&view.labels);
         Self {
-            group_key: escape(view.group_key.as_str()),
-            alertname: alertname_from_group_key(&view.group_key)
-                .map(|name| escape(&name))
-                .unwrap_or_default(),
+            title: group_title(&labels, &group_key),
+            group_key,
+            labels,
             firing: view.firing,
             resolved: view.resolved,
             total: view.total(),
@@ -393,11 +415,7 @@ impl GroupVars {
 
     /// A title for the hardcoded fallback message.
     pub(crate) fn title(&self) -> &str {
-        if self.alertname.is_empty() {
-            &self.group_key
-        } else {
-            &self.alertname
-        }
+        &self.title
     }
 
     pub(crate) const fn firing(&self) -> usize {
@@ -412,8 +430,8 @@ impl GroupVars {
 #[cfg(test)]
 mod tests {
     use super::{
-        AlertVars, AlertView, GroupVars, GroupView, RenderRequest, TemplateKind,
-        alertname_from_group_key, escape, humanize, stamp,
+        AlertVars, AlertView, GroupVars, GroupView, RenderRequest, TemplateKind, escape, humanize,
+        stamp,
     };
     use crate::Colour;
     use alertthread_core::{Fingerprint, GroupKey, LabelMap, WebhookAlert};
@@ -611,12 +629,21 @@ mod tests {
         assert_eq!(built.resolved_at, Some(at(1_784_644_260)));
     }
 
+    fn group(pairs: &[(&str, &str)]) -> GroupView {
+        GroupView {
+            group_key: GroupKey::new("{}:{alertname=\"KubePodNotReady\"}"),
+            labels: labels(pairs),
+            firing: 2,
+            resolved: 0,
+        }
+    }
+
     #[test]
     fn a_group_counts_its_members() {
         let group = GroupView {
-            group_key: GroupKey::new("{}:{alertname=\"KubePodNotReady\"}"),
             firing: 9,
             resolved: 6,
+            ..group(&[("alertname", "KubePodNotReady")])
         };
         assert_eq!(group.total(), 15);
         assert!(!group.all_resolved());
@@ -630,37 +657,79 @@ mod tests {
     }
 
     #[test]
-    fn a_group_summary_takes_its_title_from_the_group_key() {
-        // The only place a summary can get a human name: `group_message` has no labels
-        // column and neither PostGroup nor RefreshGroup carries any.
-        let key = GroupKey::new("{}/{severity=\"critical\"}:{alertname=\"KubePodNotReady\"}");
-        assert_eq!(
-            alertname_from_group_key(&key).as_deref(),
-            Some("KubePodNotReady")
-        );
-    }
-
-    #[test]
-    fn a_group_key_without_an_alertname_falls_back_to_the_raw_key() {
-        for raw in ["{}:{job=\"kubelet\"}", "", "alertname=", "alertname=\"\""] {
-            assert_eq!(alertname_from_group_key(&GroupKey::new(raw)), None, "{raw}");
-        }
-        let vars = GroupVars::build(&GroupView {
-            group_key: GroupKey::new("{}:{job=\"kubelet\"}"),
-            firing: 2,
-            resolved: 0,
-        });
-        assert_eq!(vars.title(), r#"{}:{job="kubelet"}"#);
+    fn a_group_summary_titles_itself_with_its_alertname_label() {
+        // `alertname` read from a real label map, not parsed out of the group key. The two
+        // agree here, which is the point: the same heading, without the dependency on
+        // Alertmanager's serialisation format.
+        let vars = GroupVars::build(&group(&[
+            ("alertname", "KubePodNotReady"),
+            ("job", "kube-state-metrics"),
+        ]));
+        assert_eq!(vars.title(), "KubePodNotReady");
         assert_eq!(vars.firing(), 2);
         assert_eq!(vars.total(), 2);
     }
 
     #[test]
+    fn a_group_without_an_alertname_label_is_titled_by_the_labels_it_grouped_on() {
+        // The reported failure, fixed. A `group_by` of `namespace, severity` has no
+        // `alertname`, and used to render a heading that was simply blank.
+        let vars = GroupVars::build(&group(&[
+            ("namespace", "rook-ceph"),
+            ("severity", "critical"),
+        ]));
+        assert_eq!(vars.title(), "namespace=rook-ceph severity=critical");
+    }
+
+    #[test]
+    fn an_empty_alertname_label_does_not_win_over_the_other_labels() {
+        // `alertname=""` is a present-but-useless label, and taking it would produce
+        // exactly the blank heading the fallback chain exists to prevent.
+        let vars = GroupVars::build(&group(&[("alertname", ""), ("job", "kubelet")]));
+        assert_eq!(vars.title(), "alertname= job=kubelet");
+    }
+
+    #[test]
+    fn a_group_with_no_labels_at_all_falls_back_to_its_group_key() {
+        // `group_by: []` puts every alert in one group and sends no group labels. The key
+        // is all that is left, and a degraded heading beats no heading.
+        let vars = GroupVars::build(&group(&[]));
+        assert_eq!(vars.title(), r#"{}:{alertname="KubePodNotReady"}"#);
+    }
+
+    #[test]
+    fn a_group_with_neither_labels_nor_a_key_still_gets_a_heading() {
+        // The last step of the chain. A summary headed by nothing is unusable, and this is
+        // the most-read message of a storm.
+        let vars = GroupVars::build(&GroupView {
+            group_key: GroupKey::new(""),
+            ..group(&[])
+        });
+        assert_eq!(vars.title(), "(unnamed group)");
+    }
+
+    #[test]
+    fn a_groups_labels_and_key_reach_the_template_escaped() {
+        // A label value comes from a `PrometheusRule`, and `<!channel>` in message text
+        // notifies the whole workspace — including when it arrives via the heading.
+        let vars = GroupVars::build(&GroupView {
+            group_key: GroupKey::new("{}:{team=\"<!here>\"}"),
+            ..group(&[("team", "<!channel>")])
+        });
+        assert_eq!(vars.title(), "team=&lt;!channel&gt;");
+        assert_eq!(
+            vars.labels.get("team").map(String::as_str),
+            Some("&lt;!channel&gt;")
+        );
+        assert_eq!(vars.group_key, r#"{}:{team="&lt;!here&gt;"}"#);
+    }
+
+    #[test]
     fn group_vars_carry_the_derived_counts() {
         let vars = GroupVars::build(&GroupView {
-            group_key: GroupKey::new("{}:{alertname=\"X\"}"),
             firing: 0,
             resolved: 4,
+            ..group(&[("alertname", "X")])
         });
         assert_eq!(vars.title(), "X");
         assert_eq!(vars.total(), 4);
@@ -671,9 +740,9 @@ mod tests {
     fn each_request_asks_for_the_template_it_names() {
         let alert = view();
         let group = GroupView {
-            group_key: GroupKey::new("gk"),
             firing: 1,
             resolved: 0,
+            ..group(&[])
         };
         assert_eq!(RenderRequest::Firing(&alert).kind(), TemplateKind::Firing);
         assert_eq!(
@@ -706,9 +775,9 @@ mod tests {
         // A permanently red rollup over a thread of green replies is confidently wrong,
         // which is worse than uninformative.
         let firing = GroupView {
-            group_key: GroupKey::new("gk"),
             firing: 1,
             resolved: 8,
+            ..group(&[])
         };
         assert_eq!(
             RenderRequest::GroupSummary(&firing).colour(),

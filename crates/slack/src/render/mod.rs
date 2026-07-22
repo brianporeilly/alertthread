@@ -385,6 +385,7 @@ mod tests {
     fn group() -> GroupView {
         GroupView {
             group_key: GroupKey::new("{}:{alertname=\"KubePodNotReady\"}"),
+            labels: labels(&[("alertname", "KubePodNotReady")]),
             firing: 9,
             resolved: 6,
         }

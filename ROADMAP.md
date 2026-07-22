@@ -19,42 +19,28 @@ project up will read, and git log does not distinguish "in review" from "abandon
 | 0 — Foundations | ✅ merged (#3) |
 | 1 — Pure core | ✅ merged (#4) |
 | 2 — Store layer | ✅ merged (#5) |
-| 3 — Slack layer | 🔵 in review (#7) |
-| **↳ group labels** | ⬜ **decided, not built — do before Phase 4** (see below) |
-| 4 — Wiring | ⬜ not started |
+| 3 — Slack layer | ✅ merged (#7) |
+| ↳ group labels | ✅ built — `group_message.group_labels`, both backends |
+| **4 — Wiring** | ⬜ **not started — next** |
 | 5 — Hardening | ⬜ not started |
 | 6 — Release | ⬜ not started |
 
 ADRs [001](docs/src/adr/001-adr.md) and [002](docs/src/adr/002-implementation-gaps.md) are
 merged and accepted.
 
-### Decided but not yet built: group labels on `group_message`
+### Built: group labels on `group_message`
 
-A small change that must land **before Phase 4**, because Phase 4 wires the renderer to the
-store and should be able to assume the labels are simply there.
+Landed before Phase 4, so Phase 4 can wire the renderer to the store and assume the labels
+are simply there. `group_message` gained a `group_labels` JSON column on both backends,
+written when the group is opened and never rewritten; `alertname_from_group_key` and its
+dependency on Alertmanager's group-key serialisation are gone, and templates receive
+`group.labels` plus a computed `group.title` that is never empty.
 
-**Problem.** Alertmanager sends `groupLabels` as a structured object and
-`crates/core/src/webhook.rs` models it — but nothing persists it, so
-`crates/slack/src/render/view.rs` reverse-engineers `alertname` back out of the `groupKey`
-*string*, which is Alertmanager's internal serialization rather than a documented API. It
-breaks silently when `alertname` is not in `group_by`, which is a legitimate configuration.
-
-**Decision.** Add a `group_labels` JSON column to `group_message` on both backends.
-
-- Amend `0001_initial.sql` rather than adding an `0002` — nothing is released, and a stale
-  local dev volume just needs `just down` first.
-- Delete `alertname_from_group_key` and its dependency on the group-key format.
-- **The worker reads labels from `group_message`, not from the op payload.** This is the
-  structural point: `RefreshGroup` ops are generated later, when a child resolves, and D4
-  deletes outbox rows on completion — so by the first refresh the original `PostGroup`
-  payload is gone. The labels need a home with the *group's* lifetime.
-- Templates gain `{{ group.labels.* }}` instead of one derived alertname.
-
-**Why not store `commonLabels` / `commonAnnotations` too:** they are recomputed per delivery
-from current membership, so they drift as alerts join and leave the group. Written once they
-go stale, and a stale annotation is worse than an absent one. `groupLabels` has no such
-problem — it is what *defines* the group and cannot change while the group exists. Revisit
-only with refresh-on-every-delivery semantics thought through.
+`commonLabels` / `commonAnnotations` remain deliberately unstored: they are recomputed per
+delivery from current membership, so written once they go stale, and a stale annotation is
+worse than an absent one. `groupLabels` has no such problem — it is what *defines* the
+group and cannot change while the group exists. Revisit only with refresh-on-every-delivery
+semantics thought through.
 
 ---
 
@@ -399,12 +385,29 @@ a `/still-firing` slash command.
    instead is a stronger guarantee — no rendering path *can* panic, enforced by the workspace
    lint denials — but it is not what D9 describes. Reword D9, or accept the divergence
    explicitly.
-5. **One pre-existing surviving mutant**, `crates/store/src/sqlite.rs:478`. Judged equivalent
-   on that backend; recorded so it is not rediscovered as new.
+5. **One pre-existing surviving mutant**, `replace > with >= in persist_group`, currently
+   `crates/store/src/sqlite.rs:488`. Judged equivalent on that backend; recorded so it is
+   not rediscovered as new. Cite it by name as well as by line — the line moves whenever
+   the function above it does.
 6. **ADR 003 should collect the Phase 3–4 gaps** once Phase 4 lands, the way ADR 002 batched
    Phases 1–2. Deliberately batched: one ADR per finding would make the numbering noise
-   rather than signal. Items 4 and 5 above are candidates, along with the eight decisions
+   rather than signal. Items 4, 5 and 7 above are candidates, along with the eight decisions
    listed in PR #7's body.
+7. **`group_message.group_labels` is not in ADR 001 D4's schema sketch.** Same class of
+   finding as ADR 002 §3.3's `outbox.dead_lettered_at`: D4 sketched the table before the
+   question of how a summary names itself had been asked. The column is write-once and the
+   reasoning is recorded in both migrations and on `GroupRecord`; the ADR is not rewritten.
+   Fold into ADR 003.
+8. **`just mutants` always exits non-zero, and therefore currently gates nothing.** Item 5's
+   survivor is judged equivalent, so it will never be killed — which means the recipe exits
+   2 on every run, forever, on a tree that is otherwise correct. AGENTS.md requires
+   "`just mutants`, no surviving mutants" for any change to `alertthread-core`, and as
+   written no one can satisfy it. This is the process note below turned inside out: a gate
+   that always fails trains people to ignore its exit code, and the next *genuinely* new
+   survivor rides in behind the one everybody has learned to wave through. **Fix before
+   Phase 4**, which touches core: exclude that one mutant by name with the equivalence
+   argument inline, so a non-zero exit means something again. Do not widen the exclusion to
+   the file or the function.
 
 ## Process notes worth keeping
 
@@ -419,3 +422,11 @@ a `/still-firing` slash command.
   The line was covered; the assertion just did not care.
 - **Phases ending in working code find things re-reading documents does not.** Every gap in
   ADR 002 was found by implementing the case, not by review.
+- **Amending a migration invalidates more local state than the compose volume.** sqlx
+  checksums migrations, so editing `0001_initial.sql` before release — which is the agreed
+  way to change the schema while nothing is released — fails every database an earlier run
+  left behind. `just down` clears the PostgreSQL volume, but the SQLite files the wiring
+  tests kept under `CARGO_TARGET_TMPDIR` survived it and broke `just ci` on a tree that was
+  otherwise correct. Tests that persist a database now delete it first. Worth re-checking
+  the next time a migration is amended: the failure names `VersionMismatch` and points at
+  the migration, not at the stale file.

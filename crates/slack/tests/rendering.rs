@@ -83,6 +83,10 @@ fn kube_pod_not_ready() -> GroupView {
         group_key: GroupKey::new(
             "{}/{severity=\"critical\"}:{alertname=\"KubePodNotReady\", job=\"kube-state-metrics\"}",
         ),
+        labels: labels(&[
+            ("alertname", "KubePodNotReady"),
+            ("job", "kube-state-metrics"),
+        ]),
         firing: 9,
         resolved: 6,
     }
@@ -205,6 +209,53 @@ fn group_summary_fully_resolved() {
         colour_of(&rendered.body),
         Colour::Resolved.as_hex(),
         "a red rollup over a thread of green replies is confidently wrong"
+    );
+
+    insta::assert_json_snapshot!(snapshot_of(&rendered));
+}
+
+#[test]
+fn group_summary_without_an_alertname_label() {
+    // The failure that prompted the group-labels change. A `group_by` of
+    // `namespace, severity` has no `alertname` at all, and the old heading — parsed out of
+    // Alertmanager's group key — was blank for exactly this configuration.
+    let group = GroupView {
+        group_key: GroupKey::new("{}/{}:{namespace=\"rook-ceph\", severity=\"critical\"}"),
+        labels: labels(&[("namespace", "rook-ceph"), ("severity", "critical")]),
+        firing: 4,
+        resolved: 0,
+    };
+    let rendered = Renderer::builtin().render(&RenderRequest::GroupSummary(&group), at(FIRED_AT));
+
+    assert!(rendered.is_intact());
+    assert_universally_valid(&rendered.body);
+    assert!(
+        rendered.body.text.contains("namespace=rook-ceph"),
+        "the heading must name what the group grouped by: {}",
+        rendered.body.text
+    );
+
+    insta::assert_json_snapshot!(snapshot_of(&rendered));
+}
+
+#[test]
+fn group_summary_with_no_group_labels_at_all() {
+    // `group_by: []` puts every alert in one group and sends no group labels. The key is
+    // all that is left to name it by, and a degraded heading beats a blank one.
+    let group = GroupView {
+        group_key: GroupKey::new("{}/{}:{}"),
+        labels: LabelMap::new(),
+        firing: 12,
+        resolved: 0,
+    };
+    let rendered = Renderer::builtin().render(&RenderRequest::GroupSummary(&group), at(FIRED_AT));
+
+    assert!(rendered.is_intact());
+    assert_universally_valid(&rendered.body);
+    assert!(
+        rendered.body.text.contains("{}/{}:{}"),
+        "{}",
+        rendered.body.text
     );
 
     insta::assert_json_snapshot!(snapshot_of(&rendered));

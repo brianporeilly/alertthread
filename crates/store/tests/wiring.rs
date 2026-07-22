@@ -14,13 +14,33 @@
 
 use alertthread_store::{Backend, StateStore, Store};
 
-/// Names a database file under the directory cargo gives integration tests.
+/// Names a database file under the directory cargo gives integration tests, having first
+/// removed anything a previous run left there.
 ///
 /// One file per test, because these run in parallel and a shared file would make them
 /// depend on each other's migrations.
+///
+/// The removal is load-bearing, not tidiness. `CARGO_TARGET_TMPDIR` survives between runs,
+/// and sqlx checksums migrations — so a database migrated by an earlier run fails
+/// `migrate()` with `VersionMismatch` the moment a migration file is legitimately edited,
+/// which before a release is a normal thing to do. Starting from nothing also makes these
+/// tests prove `create_if_missing` rather than inherit a file that happened to exist.
 #[cfg(feature = "sqlite")]
 fn sqlite_url(name: &str) -> String {
-    format!("sqlite://{}/{name}.sqlite", env!("CARGO_TARGET_TMPDIR"))
+    let path = format!("{}/{name}.sqlite", env!("CARGO_TARGET_TMPDIR"));
+    // The write-ahead log and shared-memory sidecars too: a stale `-wal` next to a freshly
+    // created database is a migration that fails with "table already exists".
+    for suffix in ["", "-wal", "-shm"] {
+        match std::fs::remove_file(format!("{path}{suffix}")) {
+            Ok(()) => {}
+            Err(error) => assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::NotFound,
+                "could not clear a previous run's SQLite database at {path}{suffix}"
+            ),
+        }
+    }
+    format!("sqlite://{path}")
 }
 
 #[cfg(feature = "sqlite")]

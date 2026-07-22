@@ -5,16 +5,24 @@
   its own message, so per-alert resolve still edits the right child; only the visual
   placement changes.
 
-  Receives one variable, `group`. Note that `group.alertname` is read out of
-  Alertmanager's group key and may be empty.
+  Receives one variable, `group`. `group.title` is the heading and is never empty: it is
+  the `alertname` label, or — when `group_by` does not include one — the labels
+  Alertmanager grouped on, rendered `k=v`. `group.labels` is those labels as a map.
+
+  The "grouped by" line is only worth printing when the heading did not already say it:
+  when `alertname` is the heading the other grouping labels are still news, and when
+  there is no `alertname` the heading *is* the label list.
 -#}
 {% if group.all_resolved -%}
-*:white_check_mark: RESOLVED · {{ group.total }} alerts*{% if group.alertname %} · {{ group.alertname }}{% endif %}
+*:white_check_mark: RESOLVED · {{ group.total }} alerts* · {{ group.title }}
 {% else -%}
-*:rotating_light: FIRING · {{ group.firing }} of {{ group.total }} alerts*{% if group.alertname %} · {{ group.alertname }}{% endif %}
+*:rotating_light: FIRING · {{ group.firing }} of {{ group.total }} alerts* · {{ group.title }}
 {% endif %}
 {%- if group.resolved and not group.all_resolved %}
 _{{ group.resolved }} already resolved_
+{% endif %}
+{%- if group.labels.alertname and group.labels|length > 1 %}
+_grouped by_ {% for key, value in group.labels|items %}{% if key != "alertname" %}`{{ key }}={{ value }}` {% endif %}{% endfor %}
 {% endif %}
 _Alertmanager group_ `{{ group.group_key }}`
 _Each alert is threaded under this message and updated there as it resolves._

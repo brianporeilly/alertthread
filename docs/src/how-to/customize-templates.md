@@ -114,11 +114,28 @@ Receives one variable, `group`, describing a storm-collapse parent.
 | `group.total` | int | `firing + resolved` |
 | `group.all_resolved` | bool | `firing == 0` |
 | `group.group_key` | string | Alertmanager's `groupKey` |
-| `group.alertname` | string | Read out of the group key; **may be empty** |
+| `group.labels` | map | The labels Alertmanager grouped on, its `groupLabels` |
+| `group.title` | string | A heading for the group. **Never empty** |
 
-`group.alertname` is best-effort: it is parsed from the `alertname="…"` pair inside the
-group key, because that is the only place a group's name is available at render time.
-Guard it.
+`group.labels` is Alertmanager's `groupLabels` — the labels its `group_by` grouped on, not
+the full label set of any one alert. Reach individual ones through the map, guarding as
+above:
+
+```jinja
+{% if group.labels.namespace %}in `{{ group.labels.namespace }}`{% endif %}
+```
+
+`group.title` is computed for you, and needs no guard. It is the first of these that is
+non-empty:
+
+1. `group.labels.alertname`, when `alertname` is one of the grouping labels;
+2. otherwise the grouping labels rendered as `k=v`, space-separated, in key order —
+   `namespace=rook-ceph severity=critical`;
+3. otherwise `group.group_key`, which is what a `group_by: []` leaves.
+
+Use it wherever you would have used an alert's `alertname`. Building your own heading from
+`group.labels.alertname` alone means a blank heading for every group whose `group_by` does
+not include `alertname`.
 
 ---
 

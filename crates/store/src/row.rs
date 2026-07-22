@@ -88,6 +88,7 @@ pub(crate) struct GroupRow {
     pub channel: String,
     pub message_ts: Option<String>,
     pub member_count: i32,
+    pub group_labels: Json<LabelMap>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -98,6 +99,7 @@ impl GroupRow {
             channel: ChannelId::new(self.channel),
             message_ts: self.message_ts.map(ThreadTs::new),
             member_count: self.member_count,
+            group_labels: self.group_labels.0,
             created_at: self.created_at,
         }
     }

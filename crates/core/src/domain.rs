@@ -13,7 +13,7 @@
 use chrono::{DateTime, Utc};
 
 use crate::ids::{ChannelId, Fingerprint, GroupKey, MessageTs, ThreadTs};
-use crate::webhook::{WebhookAlert, WebhookPayload};
+use crate::webhook::{LabelMap, WebhookAlert, WebhookPayload};
 
 /// One webhook delivery, once the destination channel is known.
 ///
@@ -28,6 +28,18 @@ pub struct AlertBatch {
     pub channel: ChannelId,
     /// Alertmanager's key for the group this delivery represents.
     pub group_key: GroupKey,
+    /// The labels Alertmanager grouped on, per its `group_by`.
+    ///
+    /// Carried so the shell can write them onto the `group_message` row, which is the only
+    /// place with the *group's* lifetime: `RefreshGroup` ops are planned later, when a child
+    /// resolves, and ADR 001 D4 deletes an outbox row on completion — so by the first
+    /// refresh the original `PostGroup` payload is gone. A summary that had to name its
+    /// group from the op payload would therefore have nothing to read.
+    ///
+    /// Deliberately *not* part of [`GroupState`]: [`plan`](crate::plan) decides placement,
+    /// and these labels are presentation. Threading them into the planner would put
+    /// presentation data in every plan fixture for no behavioural gain.
+    pub group_labels: LabelMap,
     /// How many alerts Alertmanager trimmed from this body because of `max_alerts`.
     pub truncated_alerts: u64,
     /// The alerts that did arrive.
@@ -40,6 +52,7 @@ impl AlertBatch {
         Self {
             channel,
             group_key: payload.group_key,
+            group_labels: payload.group_labels,
             truncated_alerts: payload.truncated_alerts,
             alerts: payload.alerts,
         }
@@ -332,7 +345,7 @@ mod tests {
         ResolveTarget,
     };
     use crate::ids::{ChannelId, Fingerprint, GroupKey, MessageTs, ThreadTs};
-    use crate::webhook::{AlertStatus, WebhookAlert, WebhookPayload};
+    use crate::webhook::{AlertStatus, LabelMap, WebhookAlert, WebhookPayload};
 
     fn payload(json: &str) -> WebhookPayload {
         serde_json::from_str(json).unwrap()
@@ -343,6 +356,7 @@ mod tests {
         let batch = AlertBatch::from_webhook(
             payload(
                 r#"{"groupKey":"gk","status":"firing","truncatedAlerts":7,
+                    "groupLabels":{"alertname":"KubePodNotReady","namespace":"prod"},
                     "alerts":[{"status":"firing","startsAt":"2026-07-21T14:02:00Z",
                     "endsAt":"0001-01-01T00:00:00Z","fingerprint":"abc"}]}"#,
             ),
@@ -354,6 +368,29 @@ mod tests {
         assert_eq!(batch.truncated_alerts, 7);
         assert_eq!(batch.alerts.len(), 1);
         assert_eq!(batch.alerts[0].fingerprint, Fingerprint::new("abc"));
+        // The whole point of the field: the labels arrive structurally, so nothing
+        // downstream has to reverse-engineer them out of the group key string.
+        assert_eq!(
+            batch.group_labels,
+            [
+                ("alertname".to_owned(), "KubePodNotReady".to_owned()),
+                ("namespace".to_owned(), "prod".to_owned()),
+            ]
+            .into_iter()
+            .collect::<LabelMap>()
+        );
+    }
+
+    #[test]
+    fn a_delivery_whose_group_by_is_empty_carries_no_group_labels() {
+        // `group_by: []` is legitimate — it puts every alert in one group — and the
+        // absent-field case has to be an empty map rather than a parse failure, because a
+        // rejected body is silence.
+        let batch = AlertBatch::from_webhook(
+            payload(r#"{"groupKey":"{}:{}","status":"firing"}"#),
+            ChannelId::new("#alerts"),
+        );
+        assert_eq!(batch.group_labels, LabelMap::new());
     }
 
     #[test]

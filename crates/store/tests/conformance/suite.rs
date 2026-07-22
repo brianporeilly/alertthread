@@ -97,9 +97,29 @@ fn batch(alerts: Vec<WebhookAlert>) -> AlertBatch {
 }
 
 fn batch_in(channel: &str, group: &str, alerts: Vec<WebhookAlert>) -> AlertBatch {
+    batch_labelled(channel, group, group_labels(), alerts)
+}
+
+/// The `groupLabels` Alertmanager would send for [`GROUP`].
+fn group_labels() -> LabelMap {
+    [
+        ("alertname".to_owned(), "KubePodNotReady".to_owned()),
+        ("job".to_owned(), "kube-state-metrics".to_owned()),
+    ]
+    .into_iter()
+    .collect()
+}
+
+fn batch_labelled(
+    channel: &str,
+    group: &str,
+    group_labels: LabelMap,
+    alerts: Vec<WebhookAlert>,
+) -> AlertBatch {
     AlertBatch {
         channel: ChannelId::new(channel),
         group_key: GroupKey::new(group),
+        group_labels,
         truncated_alerts: 0,
         alerts,
     }
@@ -236,6 +256,7 @@ fn expected_columns(table: &str) -> Vec<(&'static str, bool)> {
             ("channel", false),
             ("created_at", false),
             ("group_key", false),
+            ("group_labels", false),
             ("member_count", false),
             ("message_ts", true),
         ],
@@ -970,6 +991,79 @@ pub(crate) async fn a_late_alert_sticks_to_a_group_that_already_exists<S: StateS
         .expect("the group exists");
     assert_eq!(group.member_count, 7, "the late alert joined");
     assert!(group.message_ts.is_some(), "the parent has been posted");
+}
+
+pub(crate) async fn a_groups_labels_are_stored_when_it_is_opened<S: StateStore>(store: &S) {
+    // The whole point of the column. Without it a summary can only name its group by
+    // string-parsing Alertmanager's `groupKey`, which is that project's internal
+    // serialisation and yields nothing when `alertname` is not in `group_by`.
+    let alerts = (0..6).map(|i| firing(&format!("f{i}"))).collect();
+    ingest(store, &batch(alerts), t0()).await;
+
+    let group = store
+        .group(&group_key(), &channel())
+        .await
+        .expect("reading a group")
+        .expect("the group was opened");
+
+    assert_eq!(group.group_labels, group_labels());
+}
+
+pub(crate) async fn a_group_opened_with_no_group_labels_stores_an_empty_map<S: StateStore>(
+    store: &S,
+) {
+    // `group_by: []` is a legitimate Alertmanager configuration. The column is NOT NULL, so
+    // the empty case has to be an empty map — a group that could not be written is a
+    // storm-collapse parent that never posts, which is silence.
+    let alerts = (0..6).map(|i| firing(&format!("f{i}"))).collect();
+    let batch = batch_labelled(CHANNEL, GROUP, LabelMap::new(), alerts);
+    ingest(store, &batch, t0()).await;
+
+    let group = store
+        .group(&group_key(), &channel())
+        .await
+        .expect("reading a group")
+        .expect("the group was opened");
+
+    assert_eq!(group.group_labels, LabelMap::new());
+    assert_eq!(group.member_count, 6, "the group is otherwise intact");
+}
+
+pub(crate) async fn a_later_batch_joining_a_group_does_not_rewrite_its_labels<S: StateStore>(
+    store: &S,
+) {
+    // Write-once, asserted rather than assumed. The labels are what *defines* the group —
+    // a different `group_by` is a different group key and so a different row — so the join
+    // has nothing correct to say about them, and a join that rewrote them could only ever
+    // replace them with something wrong.
+    let alerts = (0..6).map(|i| firing(&format!("f{i}"))).collect();
+    ingest(store, &batch(alerts), t0()).await;
+    deliver(store, t0()).await;
+
+    // Deliberately different labels, which a real Alertmanager could not send for this
+    // group key. That is exactly what makes the assertion below observable.
+    let late = batch_labelled(
+        CHANNEL,
+        GROUP,
+        [("alertname".to_owned(), "SomethingElse".to_owned())]
+            .into_iter()
+            .collect(),
+        vec![firing("late")],
+    );
+    ingest(store, &late, t0() + secs(60)).await;
+
+    let group = store
+        .group(&group_key(), &channel())
+        .await
+        .expect("reading a group")
+        .expect("the group exists");
+
+    assert_eq!(group.member_count, 7, "the late alert still joined");
+    assert_eq!(
+        group.group_labels,
+        group_labels(),
+        "a rejoin must not overwrite the labels the group was opened with"
+    );
 }
 
 pub(crate) async fn resolving_a_collapsed_child_edits_the_childs_own_message<S: StateStore>(

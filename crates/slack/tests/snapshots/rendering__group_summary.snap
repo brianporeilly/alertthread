@@ -8,7 +8,7 @@ expression: snapshot_of(&rendered)
       "blocks": [
         {
           "text": {
-            "text": "*:rotating_light: FIRING · 9 of 15 alerts* · KubePodNotReady\n\n_6 already resolved_\n\n_Alertmanager group_ `{}/{severity=\"critical\"}:{alertname=\"KubePodNotReady\", job=\"kube-state-metrics\"}`\n_Each alert is threaded under this message and updated there as it resolves._",
+            "text": "*:rotating_light: FIRING · 9 of 15 alerts* · KubePodNotReady\n\n_6 already resolved_\n\n_grouped by_ `job=kube-state-metrics`\n\n_Alertmanager group_ `{}/{severity=\"critical\"}:{alertname=\"KubePodNotReady\", job=\"kube-state-metrics\"}`\n_Each alert is threaded under this message and updated there as it resolves._",
             "type": "mrkdwn"
           },
           "type": "section"

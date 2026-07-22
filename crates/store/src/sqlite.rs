@@ -33,7 +33,7 @@ use std::str::FromStr;
 
 use alertthread_core::{
     AlertBatch, ChannelId, ClaimOutcome, ClaimResult, Fingerprint, GroupKey, GroupState, Intent,
-    MessageTs, Op, Placement, Plan, ThreadTs, WebhookAlert,
+    LabelMap, MessageTs, Op, Placement, Plan, ThreadTs, WebhookAlert,
 };
 use chrono::{DateTime, TimeDelta, Utc};
 use sqlx::pool::PoolOptions;
@@ -107,15 +107,18 @@ SELECT fingerprint, channel, state, message_ts, thread_parent_ts, group_key,
 FROM alert_message WHERE fingerprint = ? AND channel = ?";
 
 const SELECT_GROUP: &str = "\
-SELECT group_key, channel, message_ts, member_count, created_at
+SELECT group_key, channel, message_ts, member_count, group_labels, created_at
 FROM group_message WHERE group_key = ? AND channel = ?";
 
 /// Opens a storm-collapse group. `DO NOTHING` rather than an error: see `persist_group`.
 const INSERT_GROUP: &str = "\
-INSERT INTO group_message (group_key, channel, message_ts, member_count, created_at)
-VALUES (?, ?, NULL, ?, ?)
+INSERT INTO group_message
+    (group_key, channel, message_ts, member_count, group_labels, created_at)
+VALUES (?, ?, NULL, ?, ?, ?)
 ON CONFLICT (group_key, channel) DO NOTHING";
 
+/// A later batch joining an existing group. `group_labels` is *not* in the SET list: see
+/// `persist_group`.
 const JOIN_GROUP: &str = "\
 UPDATE group_message SET member_count = member_count + ? WHERE group_key = ? AND channel = ?";
 
@@ -456,10 +459,16 @@ async fn mark_resolving(
 /// enqueued, so a storm produces one summary message and not one per replica. Its children
 /// are unaffected — they carry no parent timestamp and resolve it from the row the winner
 /// wrote.
+///
+/// `group_labels` is bound on the insert and never on the join. They are what *defines* the
+/// group and cannot change while it exists — a different `group_by` is a different group
+/// key and therefore a different row — so rewriting them on every join would be work whose
+/// only possible effect is to replace them with something wrong.
 async fn persist_group(
     conn: &mut SqliteConnection,
     delta: &GroupDelta<'_>,
     channel: &ChannelId,
+    group_labels: &LabelMap,
     now: DateTime<Utc>,
 ) -> Result<bool, StoreError> {
     let Some(group_key) = delta.group else {
@@ -471,6 +480,7 @@ async fn persist_group(
             .bind(group_key.as_str())
             .bind(channel.as_str())
             .bind(delta.members)
+            .bind(Json(group_labels))
             .bind(now)
             .execute(&mut *conn)
             .await?;
@@ -559,7 +569,8 @@ impl StateStore for SqliteStore {
         let plan = decide(&outcomes, group.as_ref().map(GroupRecord::state).as_ref());
 
         let delta = GroupDelta::of(&plan.ops);
-        let opened = persist_group(&mut txn, &delta, &batch.channel, now).await?;
+        let opened =
+            persist_group(&mut txn, &delta, &batch.channel, &batch.group_labels, now).await?;
 
         let mut persisted = Vec::with_capacity(plan.ops.len());
         for op in plan.ops {

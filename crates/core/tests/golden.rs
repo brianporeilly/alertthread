@@ -99,6 +99,34 @@ fn a_single_firing_alert_parses_into_something_plannable() {
 }
 
 #[test]
+fn the_group_labels_reach_the_batch_structurally_off_the_wire() {
+    // The reason this field exists. Alertmanager sends `groupLabels` as an object; the
+    // renderer used to recover a name by string-parsing `alertname="…"` out of `groupKey`,
+    // which is Alertmanager's internal serialisation and not an API. Reading the object is
+    // the same information without the dependency on that format.
+    let batch = batch(FIRING);
+
+    assert_eq!(batch.group_labels["alertname"], "CephOSDDown");
+    assert_eq!(batch.group_labels["job"], "rook-ceph-mgr");
+    assert_eq!(
+        batch.group_labels.len(),
+        2,
+        "`groupLabels` is the `group_by` set, not the alert's full label set"
+    );
+    assert_eq!(batch.group_key, GroupKey::new(CEPH_GROUP));
+}
+
+#[test]
+fn a_delivery_with_no_alerts_still_carries_the_labels_that_define_its_group() {
+    // The empty fixture is a `resolved` batch Alertmanager sent with nothing in it. Its
+    // group is still named, which is what lets a summary for it say what it is about.
+    let batch = batch(EMPTY);
+
+    assert!(batch.alerts.is_empty());
+    assert_eq!(batch.group_labels["alertname"], "KubePodNotReady");
+}
+
+#[test]
 fn the_resolved_payload_carries_the_same_fingerprint_as_the_firing_one() {
     // This is the entire premise of the project stated as an assertion. The message text,
     // the timestamps and the batch status all differ between these two payloads; the
