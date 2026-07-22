@@ -80,6 +80,15 @@ pub enum StoreError {
         channel: ChannelId,
     },
 
+    /// An `outbox` row holds an `op` value that is not one of the six this build knows.
+    ///
+    /// Reported rather than folded into a neighbouring label. `alertthread_outbox_depth{op}`
+    /// is how an operator sees what is stuck, and a gauge that quietly attributes work it
+    /// cannot classify to `post` is worse than one that admits it does not know — the row
+    /// would still be there, and the metric would say it was something else.
+    #[error("outbox row holds unknown op kind {0:?}")]
+    UnknownOpKind(String),
+
     /// `STATE_BACKEND` (or `storage.backend`) named something that is not a backend, or
     /// named one this binary was not compiled with.
     #[error(

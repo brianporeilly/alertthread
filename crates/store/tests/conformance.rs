@@ -178,4 +178,11 @@ conformance!(
     a_group_whose_parent_post_is_still_queued_is_not_deleted,
     pruning_a_healthy_store_deletes_nothing,
     pruning_leaves_other_groups_alone,
+    // Observability (ADR 001 D11) — what the Phase 4 sampler reads.
+    a_groups_membership_counts_what_is_still_firing,
+    a_groups_membership_is_scoped_to_its_own_channel,
+    a_group_nobody_has_heard_of_counts_zero_rather_than_failing,
+    an_idle_store_samples_as_empty,
+    a_sample_reports_the_queue_by_kind_and_its_oldest_row,
+    a_dead_lettered_row_leaves_the_oldest_age_gauge_alone,
 );

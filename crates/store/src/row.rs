@@ -10,6 +10,8 @@
 //! `BEGIN IMMEDIATE`), so each keeps its own statements, side by side and in the same
 //! order, for reading against each other.
 
+use std::collections::BTreeMap;
+
 use alertthread_core::{
     ChannelId, ClaimResult, Fingerprint, GroupKey, LabelMap, MessageTs, Op, Placement, ThreadTs,
 };
@@ -17,8 +19,10 @@ use chrono::{DateTime, SubsecRound, Utc};
 use sqlx::types::Json;
 
 use crate::error::StoreError;
-use crate::model::{AlertRecord, AlertState, GroupRecord, LeasedOp, OpId};
-use crate::payload::StoredOp;
+use crate::model::{
+    AlertRecord, AlertState, GroupMembership, GroupRecord, LeasedOp, OpId, StoreStats,
+};
+use crate::payload::{OpKind, StoredOp};
 
 /// Rounds a timestamp to what both backends can actually store.
 ///
@@ -217,6 +221,56 @@ pub(crate) fn resolve_miss(
             Ok(ClaimResult::AlreadyResolving)
         }
     }
+}
+
+/// Turns the two numbers the membership query returns into the split a summary renders.
+///
+/// Shared rather than written twice because it is arithmetic on a `SUM` that is `NULL` for
+/// an empty group on both backends, and "the group has no members" must not be able to
+/// become "the group is entirely resolved" on one of them.
+pub(crate) fn membership(total: i64, resolved: Option<i64>) -> GroupMembership {
+    // `usize::try_from` rather than `as`: a negative count is not something either backend
+    // produces, and saturating to zero is the reading that cannot make a summary claim more
+    // members than it has.
+    let total = usize::try_from(total).unwrap_or(0);
+    let resolved = usize::try_from(resolved.unwrap_or(0))
+        .unwrap_or(0)
+        .min(total);
+    GroupMembership {
+        firing: total - resolved,
+        resolved,
+    }
+}
+
+/// Assembles one metrics sample from the rows both backends' queries return.
+///
+/// # Errors
+///
+/// [`StoreError::UnknownOpKind`] if a queued row holds an `op` value this build cannot
+/// classify. Reported rather than skipped: the row is still there, and a depth gauge that
+/// silently omitted it would say the queue was shorter than it is.
+pub(crate) fn stats(
+    depth: Vec<(String, i64, Option<DateTime<Utc>>)>,
+    dead_lettered: i64,
+    tracked: i64,
+) -> Result<StoreStats, StoreError> {
+    let mut outbox_depth = BTreeMap::new();
+    let mut oldest_queued_at: Option<DateTime<Utc>> = None;
+
+    for (op, count, oldest) in depth {
+        let kind = OpKind::parse(&op).ok_or(StoreError::UnknownOpKind(op))?;
+        outbox_depth.insert(kind, u64::try_from(count).unwrap_or(0));
+        if let Some(at) = oldest {
+            oldest_queued_at = Some(oldest_queued_at.map_or(at, |seen| seen.min(at)));
+        }
+    }
+
+    Ok(StoreStats {
+        outbox_depth,
+        dead_lettered: u64::try_from(dead_lettered).unwrap_or(0),
+        oldest_queued_at,
+        tracked_fingerprints: u64::try_from(tracked).unwrap_or(0),
+    })
 }
 
 /// What one plan does to a storm-collapse group's membership.
@@ -421,6 +475,88 @@ mod tests {
         let rendered = error.to_string();
         assert!(rendered.contains("posting"), "{rendered}");
         assert!(rendered.contains("abc"), "{rendered}");
+    }
+
+    #[test]
+    fn a_group_with_no_members_is_not_reported_as_entirely_resolved() {
+        // `SUM` over no rows is `NULL` on both backends. Reading that as "0 resolved of 0"
+        // is correct; reading it as "all resolved" would turn a summary green the instant
+        // its children were pruned.
+        let empty = super::membership(0, None);
+        assert_eq!(empty.firing, 0);
+        assert_eq!(empty.resolved, 0);
+        assert_eq!(empty.total(), 0);
+        assert!(format!("{empty:?}").contains("firing"));
+    }
+
+    #[test]
+    fn membership_splits_a_group_into_what_is_still_firing_and_what_is_not() {
+        let split = super::membership(15, Some(6));
+        assert_eq!(split.firing, 9);
+        assert_eq!(split.resolved, 6);
+        assert_eq!(split.total(), 15);
+    }
+
+    #[test]
+    fn a_fully_resolved_group_reports_nothing_firing() {
+        assert_eq!(super::membership(4, Some(4)).firing, 0);
+    }
+
+    #[test]
+    fn membership_cannot_report_more_resolved_members_than_it_has() {
+        // Neither backend produces this; the clamp is here because the subtraction below it
+        // is on `usize`, and a summary is not the place to find out that it underflowed.
+        let clamped = super::membership(2, Some(5));
+        assert_eq!(clamped.resolved, 2);
+        assert_eq!(clamped.firing, 0);
+
+        let negative = super::membership(-1, Some(-3));
+        assert_eq!(negative.total(), 0);
+    }
+
+    #[test]
+    fn a_sample_reports_depth_per_kind_and_the_single_oldest_row() {
+        // The oldest age is across *all* kinds, not per kind: "alerts are not reaching
+        // Slack" is one question, and asking it per op would let a stuck `post` hide behind
+        // a healthy `refresh`.
+        let sample = super::stats(
+            vec![
+                ("post".to_owned(), 3, Some(at(1_000))),
+                ("resolve".to_owned(), 1, Some(at(500))),
+                ("refresh".to_owned(), 2, None),
+            ],
+            7,
+            42,
+        )
+        .expect("known op kinds classify");
+
+        assert_eq!(sample.outbox_depth.get(&super::OpKind::Post), Some(&3));
+        assert_eq!(sample.outbox_depth.get(&super::OpKind::Resolve), Some(&1));
+        assert_eq!(sample.outbox_depth.get(&super::OpKind::Refresh), Some(&2));
+        assert_eq!(sample.oldest_queued_at, Some(at(500)));
+        assert_eq!(sample.dead_lettered, 7);
+        assert_eq!(sample.tracked_fingerprints, 42);
+    }
+
+    #[test]
+    fn an_empty_queue_has_no_oldest_row_rather_than_an_age_of_zero() {
+        // Zero would mean "the oldest queued alert is brand new", which is what a healthy
+        // busy relay looks like. `None` is what an idle one looks like, and the sampler
+        // renders the two differently.
+        let sample = super::stats(Vec::new(), 0, 0).expect("an empty queue samples");
+        assert_eq!(sample.oldest_queued_at, None);
+        assert!(sample.outbox_depth.is_empty());
+        assert_eq!(sample, crate::StoreStats::default());
+    }
+
+    #[test]
+    fn an_op_kind_this_build_cannot_classify_is_reported_rather_than_dropped() {
+        // The row is still queued. A depth gauge that silently omitted it would say the
+        // queue was shorter than it is, which is the one direction this metric must not be
+        // wrong in.
+        let error = super::stats(vec![("send_carrier_pigeon".to_owned(), 1, None)], 0, 0)
+            .expect_err("an unknown op kind must not be folded into a neighbour");
+        assert!(error.to_string().contains("send_carrier_pigeon"), "{error}");
     }
 
     fn post(placement: Placement) -> Op {

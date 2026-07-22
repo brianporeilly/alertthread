@@ -43,13 +43,13 @@ use sqlx::{Sqlite, SqliteConnection, SqlitePool};
 
 use crate::error::StoreError;
 use crate::model::{
-    AlertRecord, AlertState, ColumnDef, Deferral, GroupRecord, LeasedOp, OpEffect, OpId,
-    PruneStats, RetentionPolicy, WorkerId,
+    AlertRecord, AlertState, ColumnDef, Deferral, GroupMembership, GroupRecord, LeasedOp, OpEffect,
+    OpId, PruneStats, RetentionPolicy, StoreStats, WorkerId,
 };
 use crate::payload::{OpKind, StoredOp, channel_of, fingerprint_of, group_key_of};
 use crate::row::{
-    AlertRow, ClaimProbeRow, GroupDelta, GroupRow, OutboxRow, ResolveClaimRow, leased,
-    resolve_miss, stamp,
+    AlertRow, ClaimProbeRow, GroupDelta, GroupRow, OutboxRow, ResolveClaimRow, leased, membership,
+    resolve_miss, stamp, stats,
 };
 use crate::store::StateStore;
 
@@ -216,6 +216,30 @@ WHERE NOT EXISTS (
   AND NOT EXISTS (
       SELECT 1 FROM outbox o
       WHERE o.channel = group_message.channel AND o.group_key = group_message.group_key)";
+
+/// The live firing/resolved split for one storm-collapse group (ADR 001 D5).
+///
+/// `SUM(CASE …)` rather than `COUNT(*) FILTER (WHERE …)`: the filtered form is standard SQL
+/// and PostgreSQL has it, SQLite does not, and the whole point of keeping these two files in
+/// step is that neither reaches for something the other cannot say.
+const COUNT_GROUP_MEMBERS: &str = "\
+SELECT COUNT(*),
+       SUM(CASE WHEN state IN ('resolving', 'resolved') THEN 1 ELSE 0 END)
+FROM alert_message WHERE group_key = ? AND channel = ?";
+
+/// ADR 001 D11's `outbox_depth{op}` and `outbox_oldest_age_seconds`, in one pass.
+///
+/// Dead-lettered rows are excluded from both. They are not pending work — nothing will ever
+/// lease them again — and leaving them in would peg the oldest-age gauge, which is the one
+/// metric an operator alerts on, at "for ever" as soon as a single alert was parked.
+const OUTBOX_DEPTH: &str = "\
+SELECT op, COUNT(*), MIN(created_at)
+FROM outbox WHERE dead_lettered_at IS NULL
+GROUP BY op";
+
+const OUTBOX_DEAD_LETTERED: &str = "SELECT COUNT(*) FROM outbox WHERE dead_lettered_at IS NOT NULL";
+
+const COUNT_ALERTS: &str = "SELECT COUNT(*) FROM alert_message";
 
 const DESCRIBE_TABLE: &str = "SELECT name, \"notnull\" FROM pragma_table_info(?)";
 
@@ -846,6 +870,38 @@ impl StateStore for SqliteStore {
             .await?;
 
         Ok(row.map(GroupRow::into_record))
+    }
+
+    async fn group_membership(
+        &self,
+        group_key: &GroupKey,
+        channel: &ChannelId,
+    ) -> Result<GroupMembership, StoreError> {
+        let (total, resolved): (i64, Option<i64>) = sqlx::query_as(COUNT_GROUP_MEMBERS)
+            .bind(group_key.as_str())
+            .bind(channel.as_str())
+            .fetch_one(&self.pool)
+            .await?;
+
+        Ok(membership(total, resolved))
+    }
+
+    async fn stats(&self) -> Result<StoreStats, StoreError> {
+        // One transaction, so depth, oldest age and the fingerprint count all describe the
+        // same instant. Four independent reads could report "depth 0, oldest age 40s",
+        // which is a contradiction an operator has to spend time disbelieving.
+        let mut txn = self.pool.begin().await?;
+
+        let depth: Vec<(String, i64, Option<DateTime<Utc>>)> =
+            sqlx::query_as(OUTBOX_DEPTH).fetch_all(&mut *txn).await?;
+        let (dead_lettered,): (i64,) = sqlx::query_as(OUTBOX_DEAD_LETTERED)
+            .fetch_one(&mut *txn)
+            .await?;
+        let (tracked,): (i64,) = sqlx::query_as(COUNT_ALERTS).fetch_one(&mut *txn).await?;
+
+        txn.commit().await?;
+
+        stats(depth, dead_lettered, tracked)
     }
 
     async fn describe_table(&self, table: &str) -> Result<Vec<ColumnDef>, StoreError> {

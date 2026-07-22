@@ -1905,3 +1905,135 @@ pub(crate) async fn pruning_leaves_other_groups_alone<S: StateStore>(store: &S) 
             .is_some()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Observability (ADR 001 D11)
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn a_groups_membership_counts_what_is_still_firing<S: StateStore>(store: &S) {
+    // Six alerts collapse into a group; two of them then resolve. The summary message shows
+    // a live count, so what this reports has to move when a child goes green.
+    let alerts = (0..6).map(|i| firing(&format!("a{i}"))).collect();
+    ingest(store, &batch(alerts), t0()).await;
+    deliver(store, t0()).await;
+
+    let all_firing = store
+        .group_membership(&group_key(), &channel())
+        .await
+        .expect("counting a group's members");
+    assert_eq!(all_firing.firing, 6);
+    assert_eq!(all_firing.resolved, 0);
+    assert_eq!(all_firing.total(), 6);
+
+    let resolutions = vec![resolved("a0"), resolved("a1")];
+    ingest(store, &batch(resolutions), t0() + secs(60)).await;
+    deliver(store, t0() + secs(60)).await;
+
+    let split = store
+        .group_membership(&group_key(), &channel())
+        .await
+        .expect("counting a group's members");
+    assert_eq!(split.firing, 4);
+    assert_eq!(split.resolved, 2);
+}
+
+pub(crate) async fn a_groups_membership_is_scoped_to_its_own_channel<S: StateStore>(store: &S) {
+    // `(group_key, channel)` is the group's identity. Counting across channels would make
+    // one storm's summary report another channel's alerts.
+    let here = (0..6).map(|i| firing(&format!("a{i}"))).collect();
+    ingest(store, &batch_in(CHANNEL, GROUP, here), t0()).await;
+    let there = (0..6).map(|i| firing(&format!("b{i}"))).collect();
+    ingest(store, &batch_in(OTHER_CHANNEL, GROUP, there), t0()).await;
+    deliver(store, t0()).await;
+
+    assert_eq!(
+        store
+            .group_membership(&group_key(), &channel())
+            .await
+            .expect("counting a group's members")
+            .total(),
+        6
+    );
+}
+
+pub(crate) async fn a_group_nobody_has_heard_of_counts_zero_rather_than_failing<S: StateStore>(
+    store: &S,
+) {
+    // The pruner deletes resolved alerts before it deletes their parent, so a summary can
+    // legitimately outlive every member it counts.
+    let empty = store
+        .group_membership(&GroupKey::new("never-existed"), &channel())
+        .await
+        .expect("an unknown group counts zero rather than erroring");
+
+    assert_eq!(empty.total(), 0);
+    assert_eq!(empty.firing, 0);
+}
+
+pub(crate) async fn an_idle_store_samples_as_empty<S: StateStore>(store: &S) {
+    let sample = store.stats().await.expect("sampling an idle store");
+
+    assert!(sample.outbox_depth.is_empty(), "{sample:?}");
+    assert_eq!(sample.dead_lettered, 0);
+    assert_eq!(sample.tracked_fingerprints, 0);
+    // `None`, not zero. Zero would mean "the oldest queued alert is brand new", which is
+    // what a healthy busy relay looks like — the opposite of an idle one.
+    assert_eq!(sample.oldest_queued_at, None);
+}
+
+pub(crate) async fn a_sample_reports_the_queue_by_kind_and_its_oldest_row<S: StateStore>(
+    store: &S,
+) {
+    use alertthread_store::OpKind;
+
+    // Six alerts collapse, so the queue holds one `post_group` and six `post`s. Then a
+    // resolution lands a minute later, which is younger than everything already queued.
+    let alerts = (0..6).map(|i| firing(&format!("a{i}"))).collect();
+    ingest(store, &batch(alerts), t0()).await;
+    deliver(store, t0()).await;
+    ingest(store, &batch(vec![resolved("a0")]), t0() + secs(60)).await;
+
+    let alerts = (0..6).map(|i| firing(&format!("b{i}"))).collect();
+    ingest(
+        store,
+        &batch_in(CHANNEL, OTHER_GROUP, alerts),
+        t0() + secs(90),
+    )
+    .await;
+
+    let sample = store.stats().await.expect("sampling a busy store");
+
+    assert_eq!(sample.outbox_depth.get(&OpKind::Resolve), Some(&1));
+    assert_eq!(sample.outbox_depth.get(&OpKind::Post), Some(&6));
+    assert_eq!(sample.outbox_depth.get(&OpKind::PostGroup), Some(&1));
+    assert_eq!(sample.outbox_depth.get(&OpKind::Refresh), None);
+    // 12 fingerprints tracked, and the oldest *queued* row is the resolve — the six posts
+    // from t0 were delivered and deleted on completion (ADR 001 D4).
+    assert_eq!(sample.tracked_fingerprints, 12);
+    assert_eq!(sample.oldest_queued_at, Some(t0() + secs(60)));
+}
+
+pub(crate) async fn a_dead_lettered_row_leaves_the_oldest_age_gauge_alone<S: StateStore>(
+    store: &S,
+) {
+    // The one that matters. `alertthread_outbox_oldest_age_seconds` is the metric an
+    // operator alerts on, and a parked row is not pending work — nothing will lease it
+    // again. Counting it would peg the gauge at "for ever" from the first dead letter, and
+    // the alert that fires because of it would never clear.
+    ingest(store, &batch(vec![firing("abc")]), t0()).await;
+    let leased = lease(store, "doomed", t0()).await;
+    let op = leased.first().expect("one op was queued");
+    store
+        .dead_letter(op.id, "invalid_auth", t0())
+        .await
+        .expect("dead-lettering");
+
+    let sample = store.stats().await.expect("sampling");
+
+    assert!(sample.outbox_depth.is_empty(), "{sample:?}");
+    assert_eq!(sample.oldest_queued_at, None);
+    assert_eq!(sample.dead_lettered, 1);
+    // The alert row survives it: the payload is the only record of an alert that never
+    // reached Slack, and the correlation state is what makes its resolution an orphan.
+    assert_eq!(sample.tracked_fingerprints, 1);
+}
