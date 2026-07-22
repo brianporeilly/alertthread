@@ -982,6 +982,53 @@ mod tests {
     }
 
     #[test]
+    fn the_backoff_schedule_is_exactly_this_and_not_merely_increasing() {
+        // Pinned to the instant, not to an ordering. "Second is longer than first" is true
+        // of a great many schedules, including several that would hammer Slack or park an
+        // alert for a fortnight — mutation testing found that every assertion here was of
+        // that shape, so the arithmetic underneath could be changed without a test caring.
+        //
+        // Derivation, for whoever has to change these numbers on purpose:
+        //
+        //   attempt 1: 4s << 0 =  4s, spread  500ms × (1%3 - 1 =  0) =      0 →  4s
+        //   attempt 2: 4s << 1 =  8s, spread 1000ms × (2%3 - 1 =  1) = +1000 →  9s
+        //   attempt 3: 4s << 2 = 16s, spread 2000ms × (3%3 - 1 = -1) = -2000 → 14s
+        let policy = backoff();
+        assert_eq!(
+            policy.delay(1),
+            TimeDelta::seconds(4),
+            "no spread on attempt 1"
+        );
+        assert_eq!(
+            policy.delay(2),
+            TimeDelta::seconds(9),
+            "spread runs forward"
+        );
+        assert_eq!(policy.delay(3), TimeDelta::seconds(14), "and backward");
+    }
+
+    #[test]
+    fn a_retry_is_scheduled_for_the_backoff_and_not_for_the_past() {
+        // The `until` is what the outbox sleeps on. An arithmetic slip here does not fail
+        // loudly: it schedules the retry in the past, the op is immediately leasable
+        // again, and the relay spins on Slack at whatever rate the worker loops — which
+        // reads as a rate-limit problem a long way from its cause.
+        let policy = backoff();
+        let error = SlackError::Unrecognised {
+            method: SlackMethod::PostMessage,
+            code: "some_future_slack_error".to_owned(),
+        };
+        let Outcome::Retry { until, .. } = policy.classify(&error, 2, at(100)) else {
+            panic!("an unrecognised error retries");
+        };
+        assert_eq!(until, at(100) + policy.delay(2));
+        assert!(
+            until > at(100),
+            "a retry is always in the future, got {until}"
+        );
+    }
+
+    #[test]
     fn the_total_backoff_reaches_roughly_the_half_hour_d9_describes() {
         // D9: "exponential backoff with jitter, up to `max_attempts` (default 10, ~30 min)".
         let policy = backoff();

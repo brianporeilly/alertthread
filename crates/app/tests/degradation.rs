@@ -224,10 +224,17 @@ async fn a_resolve_whose_post_has_not_landed_waits_before_it_gives_up() {
     )
     .await;
 
-    let alertthread::delivery::Outcome::Retry { error, .. } = outcome else {
+    let alertthread::delivery::Outcome::Retry { error, until } = outcome else {
         panic!("a resolve whose post has not landed should wait: {outcome:?}");
     };
     assert!(error.contains("post to land"), "{error}");
+    // As above: waiting means waiting until a later instant. Deferring to a moment already
+    // past is not a wait, it is a spin.
+    assert_eq!(until, t0() + relay.backoff().delay(1));
+    assert!(
+        until > t0(),
+        "a deferral is always into the future: {until}"
+    );
     assert!(
         slack.received_requests().await.unwrap().is_empty(),
         "nothing is sent while it waits"
@@ -432,9 +439,17 @@ async fn a_collapsed_child_waits_for_its_parent_and_then_gives_up_and_posts_anyw
     };
 
     let waiting = deliver(&relay, child.clone(), 1).await;
+    let alertthread::delivery::Outcome::Retry { until, .. } = waiting else {
+        panic!("it should wait for the summary first: {waiting:?}");
+    };
+    // The instant, not just the variant. A self-deferral scheduled in the *past* is
+    // immediately leasable again, so the child spins against the store as fast as the
+    // worker loops instead of waiting for its parent — busy silence, which is the hardest
+    // kind to notice. Mutation testing found this assertion missing.
+    assert_eq!(until, t0() + relay.backoff().delay(1));
     assert!(
-        matches!(waiting, alertthread::delivery::Outcome::Retry { .. }),
-        "it should wait for the summary first: {waiting:?}"
+        until > t0(),
+        "a deferral is always into the future: {until}"
     );
     assert!(slack.received_requests().await.unwrap().is_empty());
 

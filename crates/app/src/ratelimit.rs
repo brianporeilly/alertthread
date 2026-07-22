@@ -453,6 +453,66 @@ mod tests {
     }
 
     #[test]
+    fn the_wait_divides_the_shortfall_by_the_rate() {
+        // Every other test here runs at `rate = 1.0`, where dividing by the rate and
+        // multiplying by it are the same operation — so the arithmetic was unasserted and
+        // a mutation survived. A rate that is not 1.0 is the whole point of this test.
+        //
+        //   granted at 0        -> 0 tokens
+        //   asked again at 0.1s -> 0.1s × 2/s = 0.2 tokens, shortfall 0.8
+        //   wait = 0.8 / 2 = 0.4s  (not 0.8 × 2 = 1.6s)
+        let limiter = RateLimiter::new(2.0, 1.0);
+        assert_eq!(limiter.acquire("#alerts", at(0)), Permit::Granted);
+        assert_eq!(
+            limiter.acquire("#alerts", at(0) + TimeDelta::milliseconds(100)),
+            Permit::Wait {
+                until: at(0) + TimeDelta::milliseconds(500)
+            },
+            "waiting longer than needed delays alerts; waiting less earns a 429"
+        );
+    }
+
+    #[test]
+    fn a_bucket_idle_for_exactly_the_eviction_window_is_evicted() {
+        // The boundary itself, which `<` and `<=` disagree about and no test previously
+        // visited. Stated deliberately: at exactly the window, a fully refilled bucket
+        // goes. Keeping it is harmless; the test exists so that changing the comparison is
+        // a decision somebody makes rather than a mutation nobody notices.
+        let limiter = RateLimiter::new(1.0, 1.0);
+        assert_eq!(limiter.acquire("#gone", at(0)), Permit::Granted);
+
+        let boundary = at(0) + IDLE_EVICTION;
+        assert_eq!(limiter.acquire("#other", boundary), Permit::Granted);
+        assert_eq!(
+            limiter.tracked(),
+            1,
+            "only #other should remain at exactly the eviction window"
+        );
+    }
+
+    #[test]
+    fn a_bucket_refilled_to_exactly_its_burst_is_evicted() {
+        // The other boundary: `refilled < burst` keeps a bucket, and the interesting case
+        // is refilled == burst, which no test reached. A bucket holding exactly its burst
+        // has no state worth keeping — recreating it answers identically — so it goes.
+        //
+        // The rate is 1/1024 so that 1024 seconds refills exactly one token in binary
+        // floating point, with no rounding to argue about: 2^-10 × 2^10 is 1.0 exactly.
+        let limiter = RateLimiter::new(1.0 / 1024.0, 2.0);
+        assert_eq!(limiter.acquire("#exact", at(0)), Permit::Granted);
+
+        // Left holding 1.0 of a 2.0 burst; 1024s later it would hold exactly 2.0.
+        let refilled = at(0) + TimeDelta::seconds(1024);
+        assert!(refilled > at(0) + IDLE_EVICTION, "must be past the window");
+        assert_eq!(limiter.acquire("#other", refilled), Permit::Granted);
+        assert_eq!(
+            limiter.tracked(),
+            1,
+            "a bucket at exactly its burst should not be kept"
+        );
+    }
+
+    #[test]
     fn a_bucket_that_still_owes_tokens_is_not_forgotten() {
         // The one that matters: dropping a half-empty bucket would hand the next caller a
         // fresh full one, which is the rate limit quietly not being applied.
