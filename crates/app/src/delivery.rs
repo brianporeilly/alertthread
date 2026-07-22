@@ -499,11 +499,18 @@ impl<S: StateStore> Delivery<'_, S> {
                 .edit(&message, leased.attempts, now, OpEffect::Resolved)
                 .await
             {
-                Outcome::Done(_) => {}
-                // Anything else is returned as it stands, including `MessageLost`: the
-                // store's `complete(MessageLost)` clears the stale timestamp and enqueues a
-                // fresh post in the same transaction, and that post renders green because
-                // the row's `resolved_at` is already set.
+                Outcome::Done(OpEffect::Resolved) => {}
+                // Everything else is returned as it stands — and `Done(MessageLost)` is
+                // the reason this arm matches the *effect* rather than just `Done(_)`.
+                //
+                // `message_not_found` means the message this resolution addresses is gone.
+                // Falling through to the thread reply would post "resolved after 29m" under
+                // a `thread_ts` that no longer exists, which Slack answers with an error
+                // and which would in any case have thrown away the healing:
+                // `complete(MessageLost)` clears the stale timestamp and enqueues a fresh
+                // post in the same transaction, and that post renders green because the
+                // row's `resolved_at` is already set. The alert still gets a green message;
+                // it just gets a new one instead of an edit.
                 other => return Ok(other),
             }
         }
@@ -726,12 +733,20 @@ fn orphan_view(fingerprint: &Fingerprint, at: DateTime<Utc>) -> AlertView {
         labels: [("alertname".to_owned(), "(untracked alert)".to_owned())]
             .into_iter()
             .collect(),
+        // The fingerprint goes in the *summary* as well as in the view's own field. The
+        // built-in `resolved` template renders `summary` and does not render `fingerprint`
+        // — reasonably, because for a tracked alert the alertname and labels say far more.
+        // Here they say nothing, and the fingerprint is the only handle anybody has for
+        // finding this alert in Alertmanager. A message that omitted it would be a
+        // notification that something resolved without saying what.
         annotations: [(
             "summary".to_owned(),
-            "This alert resolved, but alertthread has no record of it firing — its state \
-             was lost, or Alertmanager's max_alerts truncated it out of the firing \
-             notification. See alertthread_orphan_resolves_total."
-                .to_owned(),
+            format!(
+                "alertthread has no record of alert `{fingerprint}` firing, so this \
+                 resolution could not be correlated to a message. Its state was lost, or \
+                 Alertmanager's max_alerts truncated it out of the firing notification — \
+                 see alertthread_orphan_resolves_total and ADR 001 D8."
+            ),
         )]
         .into_iter()
         .collect(),

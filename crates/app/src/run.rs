@@ -24,6 +24,10 @@ use crate::worker::{Worker, auth_probe_loop, prune_loop, sample_loop};
 /// A running relay.
 ///
 /// Held by `main.rs` so it can wait for the server and then stop the background tasks.
+///
+/// `Debug` prints the address and nothing else. There is no secret in here — the token
+/// lives inside the Slack client — but a `JoinSet` renders as nothing useful and the address
+/// is the one fact worth having in a log line.
 pub struct Relay {
     /// The address the server actually bound, which is not the configured one when the
     /// configured port was `0`. Tests need it; so does anybody reading a startup log.
@@ -33,6 +37,15 @@ pub struct Relay {
     tasks: JoinSet<()>,
     /// The other end of the shutdown flag.
     source: CancelSource,
+}
+
+impl std::fmt::Debug for Relay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Relay")
+            .field("addr", &self.addr)
+            .field("tasks", &self.tasks.len())
+            .finish()
+    }
 }
 
 impl Relay {
