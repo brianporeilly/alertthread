@@ -21,7 +21,7 @@ project up will read, and git log does not distinguish "in review" from "abandon
 | 2 — Store layer | ✅ merged (#5) |
 | 3 — Slack layer | ✅ merged (#7) |
 | ↳ group labels | ✅ built — `group_message.group_labels`, both backends |
-| **4 — Wiring** | ⬜ **not started — next** |
+| **4 — Wiring** | 🔵 **PR A in review — skeleton; PR B is the mock UI + tutorial** |
 | 5 — Hardening | ⬜ not started |
 | 6 — Release | ⬜ not started |
 
