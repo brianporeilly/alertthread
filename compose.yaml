@@ -9,14 +9,22 @@
 # manages the volume's context itself.
 #
 # That is deliberate, and the constraint still applies the moment anyone adds a
-# bind mount here (Phase 3 will, for template overrides). Any `- ./host:/path`
-# entry MUST carry `:z` or `:Z`, or the container gets permission denied for
-# reasons that look nothing like SELinux:
+# bind mount here. Any `- ./host:/path` entry MUST carry `:z` or `:Z`, or the
+# container gets permission denied for reasons that look nothing like SELinux —
+# the `demo` profile below mounts the Prometheus and Alertmanager configs and so
+# every one of them carries `:z`:
 #
 #     - ./templates:/etc/alertthread/templates:z
 #
 # `:z` relabels shared, for content more than one container may read. `:Z`
 # relabels private and will break any other consumer of the same directory.
+#
+# ── Profiles ──────────────────────────────────────────────────────────────────
+# `postgres` and `slack-mock` have no profile, so `just up` starts exactly them —
+# the everyday dev stack, unchanged. The end-to-end demo (relay + Prometheus +
+# Alertmanager) sits behind the `demo` profile and starts only for `just e2e`,
+# so an ordinary `just up` or `just test-pg` is not slowed down by it and does
+# not need a Slack token to come up.
 
 name: alertthread
 
@@ -55,9 +63,9 @@ services:
       retries: 30
       start_period: 5s
 
-  # Fake Slack. Phase 0 ships a stub; Phase 4 grows it into a web UI that
-  # renders messages *and threads*, which is what makes the end-to-end
-  # threading behaviour visible without a real Slack workspace.
+  # Fake Slack: a web UI at http://localhost:8081 that renders messages *and*
+  # threads, plus the three API methods the relay calls. This is what makes the
+  # end-to-end threading behaviour visible without a real Slack workspace.
   slack-mock:
     build:
       context: .
@@ -67,6 +75,82 @@ services:
       - "8081:8081"
     environment:
       RUST_LOG: info
+    # The relay does its `auth.test` once at startup and fails fast on any error
+    # (ADR 001 D11) — it does not retry — so it must not start until the mock is
+    # actually listening. busybox `wget` is in the alpine runtime image.
+    #
+    # 127.0.0.1, not localhost: the server binds IPv4 only, and busybox resolves
+    # `localhost` to ::1 first — which refuses, and the check never goes healthy.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/api/state"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 3s
+
+  # ── demo profile ────────────────────────────────────────────────────────────
+  # The relay under test, built from the release Dockerfile. Configured entirely
+  # by environment (ADR 001): SQLite on a tmpfs, posting to the mock, defaulting
+  # to #alerts. The collapse threshold is lowered so the five demo alerts trip
+  # storm-collapse (ADR 001 D5) without needing a larger rule set.
+  relay:
+    profiles: ["demo"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: localhost/alertthread:dev
+    environment:
+      ALERTTHREAD_SLACK__TOKEN: "xoxb-dev-mock-token-not-a-real-secret"
+      ALERTTHREAD_SLACK__DEFAULT_CHANNEL: "#alerts"
+      ALERTTHREAD_SLACK__BASE_URL: "http://slack-mock:8081/api/"
+      ALERTTHREAD_STORAGE__BACKEND: "sqlite"
+      ALERTTHREAD_STORAGE__URL: "sqlite:///data/state.sqlite"
+      ALERTTHREAD_COLLAPSE__THRESHOLD: "3"
+      RUST_LOG: "info,alertthread=debug"
+    ports:
+      - "8080:8080"
+    # SQLite lives on a tmpfs: the release image is `scratch` running as the
+    # nonroot uid 65532, and a tmpfs mounts world-writable (mode 1777) so that
+    # uid can create the database. A named volume would come up root-owned and
+    # the relay could not write it. The data is throwaway, which a tmpfs suits.
+    tmpfs:
+      - /data
+    depends_on:
+      slack-mock:
+        condition: service_healthy
+
+  # Real Prometheus, evaluating the demo rule in dev/prometheus/rules.yml.
+  prometheus:
+    profiles: ["demo"]
+    image: docker.io/prom/prometheus:v3.1.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --log.level=warn
+    ports:
+      - "9090:9090"
+    volumes:
+      # :z relabels for SELinux — mandatory on Fedora, harmless elsewhere.
+      - ./dev/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:z
+      - ./dev/prometheus/rules.yml:/etc/prometheus/rules.yml:z
+    depends_on:
+      alertmanager:
+        condition: service_started
+
+  # Real Alertmanager, routing to the relay's webhook. Its config carries the
+  # two settings ADR 001 D8 says are mandatory and silently break the relay.
+  alertmanager:
+    profiles: ["demo"]
+    image: docker.io/prom/alertmanager:v0.28.0
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --log.level=warn
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./dev/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:z
+    depends_on:
+      relay:
+        condition: service_started
 
 volumes:
   postgres-data:

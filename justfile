@@ -172,6 +172,24 @@ up: check-engine
 down: check-engine
     {{ compose }} down --volumes
 
+# Bring up the full end-to-end demo to watch by hand: relay + Prometheus +
+# Alertmanager + the fake Slack. Follows tutorials/01-first-alert-locally.md.
+# The demo alert fires immediately and resolves itself ~60s later, so open the
+# UI right away. Use `just e2e` for the asserted version.
+demo: check-engine
+    {{ compose }} --profile demo up -d --build
+    @echo
+    @echo "Demo stack up ({{ engine }}). Open the fake Slack and watch:"
+    @echo "    Slack UI      http://localhost:8081"
+    @echo "    Prometheus    http://localhost:9090/alerts"
+    @echo "    Alertmanager  http://localhost:9093"
+    @echo
+    @echo "Five alerts fire now and resolve themselves in ~60s. 'just demo-down' when done."
+
+# Stop the demo stack and remove its volumes.
+demo-down: check-engine
+    {{ compose }} --profile demo down --volumes
+
 # Fail early and legibly when no usable container engine is present, rather
 # than surfacing it as a confusing compose error three commands later.
 # Private so `just --list` shows exactly the recipe set AGENTS.md documents.
@@ -218,6 +236,13 @@ image TAG="localhost/alertthread:dev": check-engine
         echo "expected the relay to refuse to start with no token" >&2; exit 1; \
     fi
     @{{ engine }} images {{ TAG }}
+
+# End-to-end demo, asserted: bring up the real stack, let a Prometheus rule fire,
+# and check the mock's state shows it threaded and then resolved in place. This
+# is the Phase 4 exit criterion as a gate. Runnable locally, invoked by its own
+# CI job — deliberately NOT part of `just ci`, so the fast checks stay fast.
+e2e: check-engine
+    COMPOSE="{{ compose }}" ./scripts/e2e.sh
 
 # ---------------------------------------------------------------------------
 # CI

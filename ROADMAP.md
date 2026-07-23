@@ -11,7 +11,7 @@ the tree in a state where the next phase is the only thing that makes it work.
 
 ## Current status
 
-*Last updated 2026-07-21. Keep this current — it is the first thing anyone picking the
+*Last updated 2026-07-22. Keep this current — it is the first thing anyone picking the
 project up will read, and git log does not distinguish "in review" from "abandoned".*
 
 | Phase | State |
@@ -21,7 +21,8 @@ project up will read, and git log does not distinguish "in review" from "abandon
 | 2 — Store layer | ✅ merged (#5) |
 | 3 — Slack layer | ✅ merged (#7) |
 | ↳ group labels | ✅ built — `group_message.group_labels`, both backends |
-| **4 — Wiring** | 🔵 **PR A in review — skeleton; PR B is the mock UI + tutorial** |
+| 4 — Wiring, PR A | ✅ merged (#12) — the walking skeleton |
+| **4 — Wiring, PR B** | 🔵 **built — the mock UI, the compose demo, the tutorial; the exit criterion is now an asserted CI job** |
 | 5 — Hardening | ⬜ not started |
 | 6 — Release | ⬜ not started |
 

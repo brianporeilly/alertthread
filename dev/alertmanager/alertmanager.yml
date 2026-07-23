@@ -1,0 +1,32 @@
+# Alertmanager for the local end-to-end demo.
+#
+# The two settings on the webhook receiver below are the whole reason a working
+# example of this file belongs in the repo (ADR 001 D8). Both are MANDATORY for
+# the relay to function, and both fail *silently* when wrong — which is the worst
+# way for alerting to break:
+#
+#   * send_resolved: true   — without it the relay never learns an alert
+#                             resolved, and every message stays red forever.
+#   * max_alerts: 0         — any non-zero value makes Alertmanager truncate
+#                             alerts out of the webhook body. The truncated
+#                             alerts are never tracked, so their resolves later
+#                             arrive as orphans and surface as unrelated
+#                             messages. The symptom points nowhere near the cause.
+#
+# Timings are short so the demo is watchable; they are not production values.
+route:
+  receiver: alertthread
+  # All five demo alerts share `service: demo`, so grouping on it collapses them
+  # into one group — one webhook batch — which is what the relay needs to see to
+  # trigger storm-collapse.
+  group_by: ["service"]
+  group_wait: 2s
+  group_interval: 5s
+  repeat_interval: 1h
+
+receivers:
+  - name: alertthread
+    webhook_configs:
+      - url: "http://relay:8080/webhook?channel=%23alerts"
+        send_resolved: true
+        max_alerts: 0

@@ -1,0 +1,73 @@
+# The demo alerts. Five of them, so one Alertmanager group crosses the relay's
+# storm-collapse threshold and the webhook arrives as a batch — which is the
+# only way to see the group summary and the threaded children (ADR 001 D5).
+#
+# Each fires the instant Prometheus starts and resolves itself exactly once,
+# 60 seconds later, with no human and no file editing:
+#
+#     (time() - process_start_time_seconds{job="prometheus"} < bool 60) > 0
+#
+# `< bool 60` is 1 while this Prometheus has been up under a minute and 0 after;
+# the trailing `> 0` drops the series when it turns 0, so the alert fires for
+# the first minute and then Alertmanager sends the resolved notification through
+# `send_resolved` — the genuine resolve path, which is the point of the demo.
+#
+# They share `service: demo` so Alertmanager groups all five together.
+groups:
+  - name: demo
+    rules:
+      - alert: DemoDiskFilling
+        expr: (time() - process_start_time_seconds{job="prometheus"} < bool 60) > 0
+        for: 0s
+        labels:
+          severity: critical
+          service: demo
+          component: disk
+        annotations:
+          summary: "Disk on node-1 is 94% full"
+          description: "The root volume on node-1 is nearly full and will stop accepting writes soon."
+          runbook_url: "https://runbooks.example.com/disk-full"
+
+      - alert: DemoMemoryPressure
+        expr: (time() - process_start_time_seconds{job="prometheus"} < bool 60) > 0
+        for: 0s
+        labels:
+          severity: critical
+          service: demo
+          component: memory
+        annotations:
+          summary: "Memory pressure on node-1"
+          description: "node-1 is under sustained memory pressure and the kernel is reclaiming aggressively."
+
+      - alert: DemoCPUThrottling
+        expr: (time() - process_start_time_seconds{job="prometheus"} < bool 60) > 0
+        for: 0s
+        labels:
+          severity: warning
+          service: demo
+          component: cpu
+        annotations:
+          summary: "CPU throttling on the api deployment"
+          description: "Containers in the api deployment are being CPU-throttled by the cgroup limit."
+
+      - alert: DemoRequestLatency
+        expr: (time() - process_start_time_seconds{job="prometheus"} < bool 60) > 0
+        for: 0s
+        labels:
+          severity: warning
+          service: demo
+          component: latency
+        annotations:
+          summary: "p99 request latency above SLO"
+          description: "The api service p99 latency is above its 500ms objective."
+
+      - alert: DemoCertExpiring
+        expr: (time() - process_start_time_seconds{job="prometheus"} < bool 60) > 0
+        for: 0s
+        labels:
+          severity: warning
+          service: demo
+          component: certificate
+        annotations:
+          summary: "TLS certificate expiring soon"
+          description: "The ingress TLS certificate for example.com expires in under 7 days."

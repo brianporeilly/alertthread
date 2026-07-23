@@ -151,12 +151,28 @@ jobs:
       # runner has. The rationale for building it on every PR is in the recipe.
       - run: just image localhost/alertthread:ci
 
+  e2e:
+    name: end-to-end demo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: extractions/setup-just@v3
+      # `just e2e` brings up the whole stack — relay + Prometheus + Alertmanager
+      # + the fake Slack — through the same recipe developers run, on whichever
+      # engine the runner has, and asserts against the mock's state that the
+      # alert threaded and then resolved in place. This is Phase 4's exit
+      # criterion as a gate. It is its own job rather than part of `just ci` so
+      # the fast checks stay fast: a container build does not belong in the
+      # inner loop.
+      - run: just e2e
+        timeout-minutes: 15
+
   # Single required status check, so branch protection does not need updating
   # every time a job is added.
   ci-success:
     name: CI
     if: always()
-    needs: [lint, test, test-pg, deny, msrv, docs, image]
+    needs: [lint, test, test-pg, deny, msrv, docs, image, e2e]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any job failed
