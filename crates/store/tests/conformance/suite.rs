@@ -1363,6 +1363,277 @@ pub(crate) async fn dead_lettering_a_resolve_leaves_the_alert_alone<S: StateStor
     assert_eq!(record.state, AlertState::Resolving);
 }
 
+pub(crate) async fn a_parked_row_can_be_read_back_with_everything_needed_to_diagnose_it<
+    S: StateStore,
+>(
+    store: &S,
+) {
+    // `alertthread_outbox_dead_lettered` says how many alerts never reached Slack. This is
+    // the only route to *which*, because the lease will never hand a parked row out again.
+    ingest(store, &batch(vec![firing("abc")]), t0()).await;
+    let leased = lease(store, "w1", t0()).await;
+    store
+        .dead_letter(
+            leased[0].id,
+            "chat.postMessage: invalid_auth",
+            t0() + secs(10),
+        )
+        .await
+        .expect("dead-lettering a leased op");
+
+    let parked = store.dead_letters(100).await.expect("listing parked rows");
+    assert_eq!(parked.len(), 1);
+    assert_eq!(parked[0].id, leased[0].id);
+    assert_eq!(parked[0].op, leased[0].op, "the payload is the evidence");
+    assert_eq!(parked[0].attempts, 1);
+    assert_eq!(
+        parked[0].last_error.as_deref(),
+        Some("chat.postMessage: invalid_auth"),
+        "why it was parked is the first thing an operator needs"
+    );
+    assert_eq!(parked[0].created_at, t0(), "when the alert arrived");
+    assert_eq!(
+        parked[0].dead_lettered_at,
+        t0() + secs(10),
+        "and when it was given up on"
+    );
+}
+
+pub(crate) async fn listing_parked_rows_honours_its_limit_and_skips_live_work<S: StateStore>(
+    store: &S,
+) {
+    // A queue with real work in it must not appear in this listing at all: an op that is
+    // merely deferred is going to be delivered, and reporting it as a dead letter would
+    // page somebody about an alert that arrives thirty seconds later.
+    for i in 0..4 {
+        ingest(
+            store,
+            &batch_in(CHANNEL, GROUP, vec![firing(&format!("f{i}"))]),
+            t0() + secs(i),
+        )
+        .await;
+    }
+    let leased = lease(store, "w1", t0() + secs(10)).await;
+    assert_eq!(leased.len(), 4);
+    for op in leased.iter().take(3) {
+        store
+            .dead_letter(op.id, "boom", t0() + secs(20))
+            .await
+            .expect("dead-lettering");
+    }
+
+    let all = store.dead_letters(100).await.expect("listing");
+    assert_eq!(
+        all.len(),
+        3,
+        "the fourth op is live work, not a dead letter"
+    );
+    assert!(all[0].id < all[1].id, "oldest first: {all:?}");
+
+    let limited = store.dead_letters(2).await.expect("listing");
+    assert_eq!(limited.len(), 2);
+    assert_eq!(limited[0].id, all[0].id, "the limit takes the oldest");
+}
+
+pub(crate) async fn an_idle_store_has_no_dead_letters<S: StateStore>(store: &S) {
+    assert!(store.dead_letters(100).await.expect("listing").is_empty());
+    assert_eq!(
+        store
+            .revive_dead_letters(t0())
+            .await
+            .expect("reviving nothing"),
+        0,
+        "reviving an empty queue is a no-op, not an error"
+    );
+}
+
+pub(crate) async fn reviving_a_parked_post_makes_it_leasable_again_with_a_full_budget<
+    S: StateStore,
+>(
+    store: &S,
+) {
+    // The recovery half of ADR 001 D9. Parking is correct — a token does not become valid
+    // by being tried ten more times — but once it *has* become valid, the alternative to
+    // reviving the row is an alert nobody is ever told about.
+    ingest(store, &batch(vec![firing("abc")]), t0()).await;
+    let leased = lease(store, "w1", t0()).await;
+    store
+        .dead_letter(leased[0].id, "invalid_auth", t0() + secs(10))
+        .await
+        .expect("dead-lettering");
+
+    assert_eq!(
+        store
+            .revive_dead_letters(t0() + secs(600))
+            .await
+            .expect("reviving"),
+        1
+    );
+    assert!(
+        store.dead_letters(100).await.expect("listing").is_empty(),
+        "a revived row is no longer parked"
+    );
+
+    let again = lease(store, "w2", t0() + secs(600)).await;
+    assert_eq!(again.len(), 1, "the revived row is work again");
+    assert_eq!(again[0].id, leased[0].id);
+    assert_eq!(
+        again[0].attempts, 1,
+        "attempts reset, so the op gets a full budget rather than one last try"
+    );
+    assert_eq!(again[0].op, leased[0].op, "and the same work as before");
+}
+
+pub(crate) async fn reviving_a_parked_post_lets_its_resolution_correlate_again<S: StateStore>(
+    store: &S,
+) {
+    // `dead_letter` marks the alert `failed` so a later resolution posts standalone rather
+    // than trying to edit a message that was never sent (ADR 002 §1.2). Reviving has to
+    // undo that too: otherwise the revived post lands, and the resolution that follows it
+    // still arrives as an orphan — a green standalone message next to the red one it was
+    // supposed to edit.
+    ingest(store, &batch(vec![firing("abc")]), t0()).await;
+    let leased = lease(store, "w1", t0()).await;
+    store
+        .dead_letter(leased[0].id, "invalid_auth", t0() + secs(10))
+        .await
+        .expect("dead-lettering");
+    assert_eq!(
+        store
+            .alert(&Fingerprint::new("abc"), &channel())
+            .await
+            .expect("reading")
+            .expect("row exists")
+            .state,
+        AlertState::Failed
+    );
+
+    store
+        .revive_dead_letters(t0() + secs(600))
+        .await
+        .expect("reviving");
+
+    let record = store
+        .alert(&Fingerprint::new("abc"), &channel())
+        .await
+        .expect("reading")
+        .expect("row exists");
+    assert_eq!(record.state, AlertState::Claimed);
+
+    // And the revived post now completes into a message the resolution can edit.
+    let again = lease(store, "w2", t0() + secs(600)).await;
+    store
+        .complete(
+            again[0].id,
+            &OpEffect::Posted {
+                message_ts: MessageTs::new("1.42"),
+                thread_parent_ts: None,
+            },
+            t0() + secs(601),
+        )
+        .await
+        .expect("completing the revived post");
+
+    let plan = ingest(store, &batch(vec![resolved("abc")]), t0() + secs(700)).await;
+    assert!(
+        plan.ops.iter().any(|op| matches!(
+            op,
+            Op::Resolve {
+                target: ResolveTarget::Message { .. },
+                ..
+            }
+        )),
+        "the resolution edits the message it belongs to: {:?}",
+        plan.ops
+    );
+}
+
+pub(crate) async fn reviving_leaves_a_resolved_alert_resolved<S: StateStore>(store: &S) {
+    // `dead_letter` only marks an alert `failed` when a *post* was parked, so reviving must
+    // only clear that. An alert that reached `resolved` through its own path must not be
+    // dragged back to `claimed` — that would re-post an incident that has already ended.
+    ingest(store, &batch(vec![firing("abc")]), t0()).await;
+    deliver(store, t0()).await;
+    ingest(store, &batch(vec![resolved("abc")]), t0() + secs(300)).await;
+    let leased = lease(store, "w1", t0() + secs(300)).await;
+    store
+        .dead_letter(leased[0].id, "message_not_found", t0() + secs(400))
+        .await
+        .expect("dead-lettering the resolve");
+
+    assert_eq!(
+        store
+            .revive_dead_letters(t0() + secs(900))
+            .await
+            .expect("reviving"),
+        1
+    );
+    assert_eq!(
+        store
+            .alert(&Fingerprint::new("abc"), &channel())
+            .await
+            .expect("reading")
+            .expect("row exists")
+            .state,
+        AlertState::Resolving,
+        "a resolve dead-lettering never marked the alert failed, so reviving cannot unmark it"
+    );
+}
+
+pub(crate) async fn reviving_takes_the_whole_queue_and_leaves_live_work_alone<S: StateStore>(
+    store: &S,
+) {
+    // All-or-nothing by design: the caller only invokes this when the condition that parked
+    // the rows is believed fixed. What it must *not* do is disturb an op that is merely
+    // waiting — resetting a live row's attempts would hand a genuinely doomed op an
+    // unbounded retry budget.
+    for i in 0..3 {
+        ingest(
+            store,
+            &batch_in(CHANNEL, GROUP, vec![firing(&format!("f{i}"))]),
+            t0() + secs(i),
+        )
+        .await;
+    }
+    let leased = lease(store, "w1", t0() + secs(10)).await;
+    for op in leased.iter().take(2) {
+        store
+            .dead_letter(op.id, "invalid_auth", t0() + secs(20))
+            .await
+            .expect("dead-lettering");
+    }
+    store
+        .defer(
+            leased[2].id,
+            &Deferral::Backoff {
+                until: t0() + secs(30),
+                error: "internal_error".to_owned(),
+            },
+        )
+        .await
+        .expect("deferring the third");
+
+    assert_eq!(
+        store
+            .revive_dead_letters(t0() + secs(40))
+            .await
+            .expect("reviving"),
+        2,
+        "only the parked rows"
+    );
+
+    let all = lease(store, "w2", t0() + secs(40)).await;
+    assert_eq!(all.len(), 3, "every op is now leasable");
+    let deferred = all
+        .iter()
+        .find(|op| op.id == leased[2].id)
+        .expect("the deferred op is still there");
+    assert_eq!(
+        deferred.attempts, 2,
+        "the live row kept the attempt it had already spent"
+    );
+}
+
 pub(crate) async fn the_lease_honours_its_limit_and_takes_the_oldest_work_first<S: StateStore>(
     store: &S,
 ) {

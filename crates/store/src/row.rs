@@ -20,7 +20,7 @@ use sqlx::types::Json;
 
 use crate::error::StoreError;
 use crate::model::{
-    AlertRecord, AlertState, GroupMembership, GroupRecord, LeasedOp, OpId, StoreStats,
+    AlertRecord, AlertState, DeadLetter, GroupMembership, GroupRecord, LeasedOp, OpId, StoreStats,
 };
 use crate::payload::{OpKind, StoredOp};
 
@@ -156,6 +156,50 @@ impl OutboxRow {
             created_at: self.created_at,
         })
     }
+}
+
+/// One parked `outbox` row.
+///
+/// Separate from [`OutboxRow`] because the two are read for opposite reasons: a leased row
+/// is about to be worked, and a parked one never will be. The columns differ accordingly —
+/// a lease has no use for `dead_lettered_at`, and a dead letter has no lease to report.
+#[derive(Debug, sqlx::FromRow)]
+pub(crate) struct DeadLetterRow {
+    pub id: i64,
+    pub payload: Json<serde_json::Value>,
+    pub attempts: i32,
+    pub last_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub dead_lettered_at: DateTime<Utc>,
+}
+
+/// Converts parked rows into the public record, oldest first.
+///
+/// # Errors
+///
+/// [`StoreError::UndecodableOp`] naming the row whose payload this build cannot read. A
+/// parked row that will not decode is reported rather than skipped: it is still an alert
+/// that never reached Slack, and a listing that quietly omitted it would understate exactly
+/// the number this project treats as unacceptable.
+pub(crate) fn dead_letters(rows: Vec<DeadLetterRow>) -> Result<Vec<DeadLetter>, StoreError> {
+    let mut parked = rows
+        .into_iter()
+        .map(|row| {
+            let id = OpId::new(row.id);
+            let stored: StoredOp = serde_json::from_value(row.payload.0)
+                .map_err(|source| StoreError::UndecodableOp { id, source })?;
+            Ok(DeadLetter {
+                id,
+                op: Op::from(stored),
+                attempts: row.attempts,
+                last_error: row.last_error,
+                created_at: row.created_at,
+                dead_lettered_at: row.dead_lettered_at,
+            })
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    parked.sort_by_key(|row| row.id);
+    Ok(parked)
 }
 
 /// Converts a lease's returned rows into ops, oldest first.

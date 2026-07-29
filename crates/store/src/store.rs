@@ -8,8 +8,8 @@ use std::future::Future;
 
 use crate::error::StoreError;
 use crate::model::{
-    AlertRecord, ColumnDef, Deferral, GroupMembership, GroupRecord, LeasedOp, OpEffect, OpId,
-    PruneStats, RetentionPolicy, StoreStats, WorkerId,
+    AlertRecord, ColumnDef, DeadLetter, Deferral, GroupMembership, GroupRecord, LeasedOp, OpEffect,
+    OpId, PruneStats, RetentionPolicy, StoreStats, WorkerId,
 };
 
 /// Everything the relay does to its correlation and delivery state.
@@ -155,6 +155,41 @@ pub trait StateStore: Send + Sync {
         reason: &str,
         now: DateTime<Utc>,
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// Reads back the parked rows, oldest first.
+    ///
+    /// `alertthread_outbox_dead_lettered` says *how many* alerts never reached Slack. This
+    /// says **which**, and it is the only route back to them: a parked row is invisible to
+    /// [`lease_batch`](Self::lease_batch) for ever, so without this the payload the ADR calls
+    /// "the only record of an alert that never reached Slack" is unreadable except by hand
+    /// with a SQL client.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Database`]; [`StoreError::UndecodableOp`] if a parked row holds a
+    /// payload this build cannot read.
+    fn dead_letters(
+        &self,
+        limit: u32,
+    ) -> impl Future<Output = Result<Vec<DeadLetter>, StoreError>> + Send;
+
+    /// Returns every parked row to the queue, and reports how many that was.
+    ///
+    /// The inverse of [`dead_letter`](Self::dead_letter): `dead_lettered_at` is cleared,
+    /// `attempts` is reset so the op gets a full budget again, and an alert that
+    /// `dead_letter` marked `failed` goes back to `claimed` so its post can land and its
+    /// eventual resolution correlates to it rather than arriving as an orphan.
+    ///
+    /// Deliberately all-or-nothing rather than selective. See the caller in the app crate
+    /// for when this is safe to invoke.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Database`].
+    fn revive_dead_letters(
+        &self,
+        now: DateTime<Utc>,
+    ) -> impl Future<Output = Result<u64, StoreError>> + Send;
 
     /// Deletes finished state (ADR 001 D4, retention; PRD §5.7).
     ///

@@ -248,8 +248,10 @@ async fn the_auth_prober_reports_a_revoked_token_as_a_metric_and_not_as_unreadin
     let (source, token) = cancellation();
     let handle = tokio::spawn(auth_probe_loop(
         client,
+        Arc::clone(&relay.store),
         Arc::clone(&relay.metrics),
         TimeDelta::milliseconds(10),
+        true,
         token,
     ));
 
@@ -283,8 +285,10 @@ async fn the_auth_prober_reports_a_working_token() {
     let (source, token) = cancellation();
     let handle = tokio::spawn(auth_probe_loop(
         client,
+        Arc::clone(&relay.store),
         Arc::clone(&relay.metrics),
         TimeDelta::milliseconds(10),
+        true,
         token,
     ));
     wait_for(&relay.metrics, "alertthread_slack_auth_valid 1").await;

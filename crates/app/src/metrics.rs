@@ -139,6 +139,13 @@ pub struct Metrics {
     pub fallback_posts: Family<ReasonLabel, Counter>,
     /// Ops parked because they will never succeed. **Page on this.**
     pub dead_letters: Family<ReasonLabel, Counter>,
+    /// Parked ops returned to the queue after the condition that parked them cleared.
+    ///
+    /// **Not in D11**, which stops at the dead-letter counter. It is here because the
+    /// recovery is automatic: without a counter, an operator who replaced a revoked token
+    /// would see `alertthread_dead_letter_total` stop rising and have no way to tell whether
+    /// the alerts already parked were delivered or written off.
+    pub dead_letters_revived: Counter,
 
     /// Pending outbox rows, by kind. Sampled.
     pub outbox_depth: Family<OpLabel, Gauge>,
@@ -269,6 +276,14 @@ impl Metrics {
             dead_letters.clone(),
         );
 
+        let dead_letters_revived = Counter::default();
+        registry.register(
+            "dead_letter_revived",
+            "Parked outbox operations returned to the queue after the condition that parked \
+             them cleared",
+            dead_letters_revived.clone(),
+        );
+
         let outbox_depth = Family::<OpLabel, Gauge>::default();
         registry.register(
             "outbox_depth",
@@ -324,6 +339,7 @@ impl Metrics {
             alerts_truncated,
             fallback_posts,
             dead_letters,
+            dead_letters_revived,
             outbox_depth,
             outbox_oldest_age,
             outbox_dead_lettered,
@@ -440,6 +456,11 @@ impl Metrics {
         self.dead_letters
             .get_or_create(&ReasonLabel { reason })
             .inc();
+    }
+
+    /// Counts parked ops returned to the queue.
+    pub fn dead_letters_revived(&self, count: u64) {
+        self.dead_letters_revived.inc_by(count);
     }
 
     /// Counts one webhook delivery by what the relay did with it.

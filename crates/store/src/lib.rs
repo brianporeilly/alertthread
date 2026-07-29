@@ -55,8 +55,8 @@ mod sqlite;
 pub use dispatch::{Backend, Store};
 pub use error::StoreError;
 pub use model::{
-    AlertRecord, AlertState, ColumnDef, Deferral, GroupMembership, GroupRecord, LeasedOp, OpEffect,
-    OpId, PruneStats, RetentionPolicy, StoreStats, WorkerId,
+    AlertRecord, AlertState, ColumnDef, DeadLetter, Deferral, GroupMembership, GroupRecord,
+    LeasedOp, OpEffect, OpId, PruneStats, RetentionPolicy, StoreStats, WorkerId,
 };
 pub use payload::OpKind;
 pub use store::StateStore;

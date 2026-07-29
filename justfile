@@ -30,6 +30,10 @@ pg_cov_json := coverage_dir / "llvm-cov-postgres.json"
 # not contain.
 pg_target_dir := justfile_directory() / "target" / "llvm-cov-pg"
 
+# Where cargo-mutants writes its verdict. The `mutants` recipe reads the
+# survivor lists back out of here to decide its own exit code.
+mutants_dir := justfile_directory() / "mutants.out"
+
 # Policy, stated in ROADMAP.md; the gate script enforces it independently.
 ignore_regex := '(crates/app/src/main\.rs|dev/slack-mock/)'
 
@@ -114,14 +118,60 @@ coverage:
 
 # Mutation testing. Required for any change to alertthread-core.
 mutants *ARGS:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    # Runs the whole workspace and prints every survivor. The *exit code* is
+    # narrowed to `crates/core` and `crates/store`.
+    #
+    # Why narrowed rather than excluded (ROADMAP known open item #10): the app
+    # crate's survivors are *unkilled*, not unkillable — process lifecycle,
+    # log-only branches, field accessors. Naming them in --exclude-re would
+    # assert they are equivalent, which is false, and would hide a real one
+    # arriving at the same site later. Narrowing the gate keeps them printed
+    # and visible on every run while giving the exit code a meaning that a
+    # correct tree can actually satisfy. A gate that is always red carries no
+    # information and gets waved through.
+    #
     # postgres.rs is not compiled by this build, so every mutant in it would
     # report as a survivor; `just mutants-pg` tests it instead.
     #
     # --exclude-re suppresses one equivalent mutant, by name because the line
-    # moves. ROADMAP known open item #5 carries the argument.
+    # moves. ROADMAP known open item #5 carries the argument. It is in `store`,
+    # which this gate covers, so it has to stay.
     cargo mutants --workspace --test-tool nextest \
         --exclude 'crates/store/src/postgres.rs' \
         --exclude-re 'replace > with >= in persist_group' {{ ARGS }}
+    status=$?
+
+    # 2 = mutants missed, 3 = mutants timed out. Anything else is the run
+    # itself failing — a usage error, a build error, a failing baseline — and
+    # is never something to reinterpret.
+    if [[ $status -ne 0 && $status -ne 2 && $status -ne 3 ]]; then
+        exit $status
+    fi
+
+    survivors=$(cat "{{ mutants_dir }}/missed.txt" "{{ mutants_dir }}/timeout.txt" 2>/dev/null || true)
+    if [[ -z "$survivors" ]]; then
+        echo
+        echo "just mutants: no surviving mutants anywhere in the workspace."
+        exit 0
+    fi
+
+    echo
+    echo "Surviving mutants across the workspace:"
+    echo "$survivors" | sed 's/^/  /'
+
+    gated=$(echo "$survivors" | grep -E '^crates/(core|store)/' || true)
+    if [[ -n "$gated" ]]; then
+        echo
+        echo "GATED — these are in core or store, where no mutant may survive:" >&2
+        echo "$gated" | sed 's/^/  /' >&2
+        exit 1
+    fi
+
+    echo
+    echo "just mutants: survivors above are outside core and store; triage them"
+    echo "              (AGENTS.md, 'Mutation testing'). The gate passes."
 
 # Mutation testing for the PostgreSQL backend. Needs `just up`.
 #

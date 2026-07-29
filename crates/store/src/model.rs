@@ -264,6 +264,26 @@ pub struct LeasedOp {
     pub created_at: DateTime<Utc>,
 }
 
+/// One outbox row that was parked by [`StateStore::dead_letter`](crate::StateStore).
+///
+/// Every field is something an operator needs in order to answer "which alert did not
+/// arrive, and why". The row is never leased again, so this is the only way to read it back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeadLetter {
+    /// The row's identity.
+    pub id: OpId,
+    /// The work that never happened.
+    pub op: alertthread_core::Op,
+    /// How many attempts were spent before it was parked.
+    pub attempts: i32,
+    /// What the last failure said. `None` only for a row parked without a reason recorded.
+    pub last_error: Option<String>,
+    /// When the alert arrived.
+    pub created_at: DateTime<Utc>,
+    /// When it was parked.
+    pub dead_lettered_at: DateTime<Utc>,
+}
+
 /// How long finished state is kept (ADR 001 D4, retention; PRD §5.7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RetentionPolicy {

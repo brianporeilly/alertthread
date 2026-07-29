@@ -32,13 +32,13 @@ use sqlx::{PgConnection, PgPool, Postgres};
 
 use crate::error::StoreError;
 use crate::model::{
-    AlertRecord, AlertState, ColumnDef, Deferral, GroupMembership, GroupRecord, LeasedOp, OpEffect,
-    OpId, PruneStats, RetentionPolicy, StoreStats, WorkerId,
+    AlertRecord, AlertState, ColumnDef, DeadLetter, Deferral, GroupMembership, GroupRecord,
+    LeasedOp, OpEffect, OpId, PruneStats, RetentionPolicy, StoreStats, WorkerId,
 };
 use crate::payload::{OpKind, StoredOp, channel_of, fingerprint_of, group_key_of};
 use crate::row::{
-    AlertRow, ClaimProbeRow, GroupDelta, GroupRow, OutboxRow, ResolveClaimRow, leased, membership,
-    resolve_miss, stamp, stats,
+    AlertRow, ClaimProbeRow, DeadLetterRow, GroupDelta, GroupRow, OutboxRow, ResolveClaimRow,
+    dead_letters, leased, membership, resolve_miss, stamp, stats,
 };
 use crate::store::StateStore;
 
@@ -175,6 +175,26 @@ RETURNING op, channel, fingerprint";
 const MARK_ALERT_FAILED: &str = "\
 UPDATE alert_message SET state = 'failed'
 WHERE fingerprint = $1 AND channel = $2 AND state IN ('claimed', 'posted')";
+
+const SELECT_DEAD_LETTERS: &str = "\
+SELECT id, payload, attempts, last_error, created_at, dead_lettered_at
+FROM outbox WHERE dead_lettered_at IS NOT NULL
+ORDER BY id LIMIT $1";
+
+/// The inverse of `DEAD_LETTER`. `attempts = 0` rather than a decrement: the op is being
+/// given a fresh budget because the condition that exhausted the old one is believed fixed.
+const REVIVE_DEAD_LETTERS: &str = "\
+UPDATE outbox
+SET dead_lettered_at = NULL, attempts = 0, next_attempt_at = $1,
+    leased_by = NULL, leased_until = NULL
+WHERE dead_lettered_at IS NOT NULL
+RETURNING channel, fingerprint";
+
+/// Undoes `MARK_ALERT_FAILED`, so the revived post can record a `message_ts` and the
+/// alert's eventual resolution correlates to it instead of arriving as an orphan.
+const UNMARK_ALERT_FAILED: &str = "\
+UPDATE alert_message SET state = 'claimed'
+WHERE fingerprint = $1 AND channel = $2 AND state = 'failed'";
 
 const PRUNE_RESOLVED: &str = "\
 DELETE FROM alert_message
@@ -704,6 +724,37 @@ impl StateStore for PostgresStore {
 
         txn.commit().await?;
         Ok(())
+    }
+
+    async fn dead_letters(&self, limit: u32) -> Result<Vec<DeadLetter>, StoreError> {
+        let rows: Vec<DeadLetterRow> = sqlx::query_as(SELECT_DEAD_LETTERS)
+            .bind(i64::from(limit))
+            .fetch_all(&self.pool)
+            .await?;
+        dead_letters(rows)
+    }
+
+    async fn revive_dead_letters(&self, now: DateTime<Utc>) -> Result<u64, StoreError> {
+        let now = stamp(now);
+        let mut txn = self.pool.begin().await?;
+
+        let revived: Vec<(String, Option<String>)> = sqlx::query_as(REVIVE_DEAD_LETTERS)
+            .bind(now)
+            .fetch_all(&mut *txn)
+            .await?;
+
+        for (channel, fingerprint) in &revived {
+            if let Some(fingerprint) = fingerprint {
+                sqlx::query(UNMARK_ALERT_FAILED)
+                    .bind(fingerprint)
+                    .bind(channel)
+                    .execute(&mut *txn)
+                    .await?;
+            }
+        }
+
+        txn.commit().await?;
+        Ok(u64::try_from(revived.len()).unwrap_or(u64::MAX))
     }
 
     async fn prune(

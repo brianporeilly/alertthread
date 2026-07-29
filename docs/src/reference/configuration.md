@@ -239,6 +239,7 @@ slack:
   timeout: 15s
   rate_limit_divisor: 1
   auth_probe_interval: 15m
+  auth_startup_grace: 30s
 ```
 
 ### `slack.token`
@@ -341,12 +342,44 @@ on itself.
 
 How often to re-check that the bot token is still valid, in the background.
 
-Startup already fails fast on a bad token. What this covers is mid-life revocation: a token
-revoked at 2pm with nothing firing until 3am is a silent failure discovered at the worst
-possible moment. 96 calls a day is negligible.
+Startup refuses to run with a token Slack definitively rejects. What this covers is mid-life
+revocation: a token revoked at 2pm with nothing firing until 3am is a silent failure
+discovered at the worst possible moment. 96 calls a day is negligible.
 
 The result feeds `alertthread_slack_auth_valid` and **not** `/readyz` — see
 [Metrics](metrics.md) and [HTTP API](http-api.md) for why.
+
+The probe also has a second job. If it sees the token go from rejected to accepted, it
+returns everything in the dead-letter queue to the outbox, so the alerts that a bad token
+cost are delivered rather than written off. `alertthread_dead_letter_revived_total` counts
+them.
+
+### `slack.auth_startup_grace`
+
+| | |
+|---|---|
+| Environment variable | `ALERTTHREAD_SLACK__AUTH_STARTUP_GRACE` |
+| Type | duration |
+| Default | `30s` |
+
+How long to keep retrying a **transient** startup `auth.test` before starting anyway.
+
+The relay checks the bot token once at startup, and what it does about a failure depends on
+which kind it was:
+
+| Startup `auth.test` result | Behaviour |
+|---|---|
+| Accepted | Start. `alertthread_slack_auth_valid` is `1` |
+| `invalid_auth`, `not_authed`, `account_inactive`, `token_revoked`, `token_expired`, `missing_scope`, a malformed token, an unusable `base_url` | **Refuse to start**, immediately, with no retry |
+| A transport error, an HTTP 5xx, a 429, or anything else the [Slack error taxonomy](slack-errors.md) calls retryable | Retry with backoff for up to `auth_startup_grace`, then **start anyway** with `alertthread_slack_auth_valid` at `0` |
+
+Setting it to `0s` makes one attempt and then starts. There is no setting that makes a
+definitively rejected token start the relay, and no setting that makes a Slack outage stop
+it starting.
+
+Raise it if your Slack egress is behind something slow to come up, and keep it inside your
+`startupProbe` budget: a pod that is still in startup serves neither `/metrics` nor
+`/readyz`, so a long grace trades one kind of invisibility for another.
 
 ---
 

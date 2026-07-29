@@ -34,12 +34,14 @@
 //! shutdown should not *rely* on expiry, because expiry costs a full lease duration of
 //! delay on an alert somebody is waiting for.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use alertthread_core::{ChannelId, Op};
 use alertthread_slack::{Renderer, SlackClient};
-use alertthread_store::{Deferral, LeasedOp, RetentionPolicy, StateStore, StoreError, WorkerId};
+use alertthread_store::{
+    DeadLetter, Deferral, LeasedOp, OpId, RetentionPolicy, StateStore, StoreError, WorkerId,
+};
 use chrono::{DateTime, TimeDelta, Utc};
 
 use crate::config::WorkerConfig;
@@ -384,28 +386,43 @@ pub async fn sample_loop<S: StateStore>(
     }
 }
 
-/// Re-checks the bot token, and reports the answer as a metric.
+/// How many parked rows one report reads. Enough to name every alert in a storm that was
+/// lost wholesale, bounded so a pathological queue cannot turn one log line into a million.
+const DEAD_LETTER_REPORT_LIMIT: u32 = 500;
+
+/// Re-checks the bot token, reports the answer as a metric, and un-parks what a bad token
+/// cost when it comes back.
 ///
-/// **Not as readiness.** Startup already fails fast on a bad token (ADR 001 D11); what this
-/// covers is mid-life revocation — a token revoked at 2pm with nothing firing until 3am.
-/// Feeding it into `/readyz` instead would make every replica unready at once (they share
-/// one token), Alertmanager's POST would fail, it would retry a few times and give up, and
-/// the alert would be **lost**. Accepting the webhook into the outbox and retrying is
-/// exactly what the outbox is for.
-pub async fn auth_probe_loop(
+/// **Not as readiness.** Startup does not fail fast on a *transient* failure any more (see
+/// [`crate::run::start`]), and it never fed this into `/readyz`: doing so would make every
+/// replica unready at once (they share one token), Alertmanager's POST would fail, it would
+/// retry a few times and give up, and the alert would be **lost**. Accepting the webhook
+/// into the outbox and retrying is exactly what the outbox is for.
+///
+/// `startup_valid` seeds the transition detector so the first probe after a degraded start
+/// is recognised as a recovery rather than as more of the same.
+pub async fn auth_probe_loop<S: StateStore>(
     slack: Arc<SlackClient>,
+    store: Arc<S>,
     metrics: Arc<Metrics>,
     interval: TimeDelta,
+    startup_valid: bool,
     shutdown: CancelToken,
 ) {
+    let mut was_valid = startup_valid;
     while !shutdown.is_cancelled() {
         match slack.auth_test().await {
             Ok(identity) => {
                 metrics.slack_auth_valid.set(1);
                 tracing::debug!(team = %identity.team, user = %identity.user, "bot token is valid");
+                if !was_valid {
+                    revive_dead_letters(store.as_ref(), &metrics, Utc::now()).await;
+                }
+                was_valid = true;
             }
             Err(error) => {
                 metrics.slack_auth_valid.set(0);
+                was_valid = false;
                 tracing::error!(
                     %error,
                     "Slack rejected the bot token; queued alerts will not be delivered until \
@@ -416,6 +433,95 @@ pub async fn auth_probe_loop(
         }
         sleep_or_shutdown(&shutdown, interval).await;
     }
+}
+
+/// Returns every parked op to the queue, on the one transition that makes it safe.
+///
+/// ADR 001 D9 parks an op that Slack rejected terminally, and `invalid_auth` is named in
+/// that row. Parking is right — a token does not become valid by being tried ten more times
+/// — but it leaves the alert permanently undelivered, which is the outcome AGENTS.md says
+/// does not merge. The token becoming valid again is the event that says the reason has
+/// gone; this is what acts on it.
+///
+/// It revives the *whole* queue rather than only the rows parked for an auth reason. Doing
+/// it selectively would need the reason persisted per row, and the cost of the coarse
+/// version is bounded and self-correcting: an op parked for some other terminal reason
+/// fails once more and re-parks, at the cost of one Slack call, only on a transition that
+/// happens when a human has just fixed something. The cost of the precise version being
+/// wrong is an alert nobody hears about.
+async fn revive_dead_letters<S: StateStore>(store: &S, metrics: &Metrics, now: DateTime<Utc>) {
+    match store.revive_dead_letters(now).await {
+        Ok(0) => {}
+        Ok(count) => {
+            metrics.dead_letters_revived(count);
+            tracing::warn!(
+                count,
+                "the bot token is working again; returning parked alerts to the queue. \
+                 These are late, and late is the point — they were never delivered at all"
+            );
+        }
+        Err(error) => tracing::error!(
+            %error,
+            "could not return parked alerts to the queue after the bot token recovered; \
+             they are still in the dead-letter queue"
+        ),
+    }
+}
+
+/// Reports the alerts that never reached Slack, for as long as they are still parked.
+///
+/// The worker logs one ERROR at the moment it parks a row, and that line is gone by the
+/// time anybody is paged: it is one entry in a log aggregator's retention window, and a
+/// restart does not repeat it. This is the surface that does — every parked row is reported
+/// once per process, so the set is re-announced on every restart and an operator who arrives
+/// after the fact can still find out *which* alerts were lost rather than only how many.
+///
+/// Reported once, not once per interval: a parked row that stays parked for a week must not
+/// become a week of identical ERROR lines, because a signal nobody can read is not a signal.
+pub async fn dead_letter_loop<S: StateStore>(
+    store: Arc<S>,
+    interval: TimeDelta,
+    shutdown: CancelToken,
+) {
+    let mut reported = HashSet::new();
+    while !shutdown.is_cancelled() {
+        match store.dead_letters(DEAD_LETTER_REPORT_LIMIT).await {
+            Ok(parked) => {
+                report_dead_letters(&parked, &mut reported);
+            }
+            Err(error) => tracing::error!(%error, "could not read the dead-letter queue"),
+        }
+        sleep_or_shutdown(&shutdown, interval).await;
+    }
+}
+
+/// Logs the parked rows this process has not logged yet, and returns how many that was.
+///
+/// Split out of the loop so the once-per-process rule is testable without reading log
+/// output, because that rule is the only thing between this surface and a week of identical
+/// ERROR lines — and a signal nobody can read is not a signal.
+fn report_dead_letters(parked: &[DeadLetter], reported: &mut HashSet<OpId>) -> usize {
+    // Forget rows that are no longer parked, so the set cannot grow without bound and so a
+    // revived row that fails again is announced again rather than being suppressed by the
+    // memory of the first time.
+    reported.retain(|id| parked.iter().any(|row| row.id == *id));
+
+    let mut announced = 0;
+    for row in parked {
+        if reported.insert(row.id) {
+            announced += 1;
+            tracing::error!(
+                op = %row.id,
+                kind = ?row.op,
+                attempts = row.attempts,
+                queued_at = %row.created_at,
+                parked_at = %row.dead_lettered_at,
+                last_error = row.last_error.as_deref().unwrap_or("(none recorded)"),
+                "an alert is in the dead-letter queue and has never reached Slack"
+            );
+        }
+    }
+    announced
 }
 
 /// Whether the worker should wait before leasing again.
@@ -590,6 +696,82 @@ mod tests {
         let (source, token) = cancellation();
         drop(source);
         token.cancelled().await;
+    }
+
+    fn parked(id: i64) -> alertthread_store::DeadLetter {
+        alertthread_store::DeadLetter {
+            id: alertthread_store::OpId::new(id),
+            op: Op::Post {
+                fingerprint: Fingerprint::new(format!("f{id}")),
+                channel: channel(),
+                placement: Placement::Channel,
+            },
+            attempts: 10,
+            last_error: Some("chat.postMessage: invalid_auth".to_owned()),
+            created_at: chrono::DateTime::from_timestamp(1_000, 0).expect("in range"),
+            dead_lettered_at: chrono::DateTime::from_timestamp(2_000, 0).expect("in range"),
+        }
+    }
+
+    #[test]
+    fn a_parked_alert_is_announced_once_per_process_and_not_once_per_sweep() {
+        // The sweep runs every fifteen seconds for as long as the row is parked. Announcing
+        // on every one of them would turn a week-old dead letter into fifty thousand
+        // identical ERROR lines, and a signal nobody can read is not a signal.
+        let mut reported = super::HashSet::new();
+        let rows = [parked(1), parked(2)];
+
+        assert_eq!(super::report_dead_letters(&rows, &mut reported), 2);
+        assert_eq!(
+            super::report_dead_letters(&rows, &mut reported),
+            0,
+            "the same rows are not announced twice"
+        );
+
+        // A row that shows up later is announced when it does, and only then.
+        let more = [parked(1), parked(2), parked(3)];
+        assert_eq!(super::report_dead_letters(&more, &mut reported), 1);
+    }
+
+    #[test]
+    fn a_row_that_was_revived_and_parked_again_is_announced_again() {
+        // Otherwise the memory of the first failure would silence the second, and an
+        // operator who fixed the wrong thing would see nothing when it failed once more.
+        let mut reported = super::HashSet::new();
+        assert_eq!(super::report_dead_letters(&[parked(1)], &mut reported), 1);
+
+        // Revived: the queue no longer holds it.
+        assert_eq!(super::report_dead_letters(&[], &mut reported), 0);
+        assert!(reported.is_empty(), "and the memory of it is dropped");
+
+        assert_eq!(super::report_dead_letters(&[parked(1)], &mut reported), 1);
+    }
+
+    #[test]
+    fn forgetting_a_revived_row_forgets_that_row_and_not_the_others() {
+        // The two halves have to hold at once, and a queue that empties completely cannot
+        // tell them apart: the row that went away is forgotten, and every row still parked
+        // stays remembered so it is not re-announced alongside it.
+        let mut reported = super::HashSet::new();
+        assert_eq!(
+            super::report_dead_letters(&[parked(1), parked(2)], &mut reported),
+            2
+        );
+
+        // Row 1 was revived; row 2 is still parked.
+        assert_eq!(
+            super::report_dead_letters(&[parked(2)], &mut reported),
+            0,
+            "row 2 was already announced and must not be announced again"
+        );
+        assert!(reported.contains(&alertthread_store::OpId::new(2)));
+        assert!(!reported.contains(&alertthread_store::OpId::new(1)));
+
+        // Row 1 fails again: announced. Row 2 has not moved: still silent.
+        assert_eq!(
+            super::report_dead_letters(&[parked(1), parked(2)], &mut reported),
+            1
+        );
     }
 
     #[tokio::test]

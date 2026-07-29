@@ -23,7 +23,8 @@ project up will read, and git log does not distinguish "in review" from "abandon
 | ↳ group labels | ✅ built — `group_message.group_labels`, both backends |
 | 4 — Wiring, PR A | ✅ merged (#12) — the walking skeleton |
 | 4 — Wiring, PR B | ✅ merged (#13) — mock UI, compose demo, tutorial; the exit criterion is an asserted CI job |
-| **5 — Hardening** | ⬜ **not started — next** |
+| **5 — Hardening, PR A** | 🟡 **in review — resilience: crash recovery, storm-under-load, dead letters, startup auth** |
+| 5 — Hardening, PR B | ⬜ not started — webhook auth, container hardening, `PrometheusRule`, troubleshooting docs |
 | 6 — Release | ⬜ not started |
 
 ADRs [001](docs/src/adr/001-adr.md) and [002](docs/src/adr/002-implementation-gaps.md) are
@@ -124,7 +125,9 @@ Mutation runs are slow, so they are not in the default loop:
 
 - `just mutants` — on demand, and **required for any change to `alertthread-core`**
 - Nightly in CI across the workspace
-- Target: no surviving mutants in `core`; triage and document elsewhere
+- **It runs the whole workspace and prints every survivor; its exit code covers `core` and
+  `store`.** Survivors elsewhere stay visible on every run and are triaged in the PR rather
+  than gating it — see known open item 10 for why that is a narrowing and not an exclusion
 
 ### Tooling and the inner loop
 
@@ -340,18 +343,29 @@ no human in the loop.
 
 ## Phase 5 — Hardening
 
-- Storm-collapse end-to-end under load
-- Dead-letter handling + alerting
+Split in two. PR A is the resilience half — everything that decides whether an alert
+survives a crash, a storm or a Slack outage. PR B is the security and packaging half.
+
+### PR A — resilience
+
+- Crash-recovery tests: `kill -9` at every stage of delivery, assert no silence
+- Storm-collapse end-to-end under concurrent load
+- Dead-letter handling: reporting and recovery
+- Startup auth split on the D9 error taxonomy (known open item 12)
+- `just mutants` gate narrowed to `core` and `store` (known open item 10)
+
+### PR B — security and packaging
+
 - Optional bearer-token auth on the webhook endpoint
 - Container hardening: non-root, read-only rootfs, dropped caps, seccomp
-- Crash-recovery tests: kill the process mid-post, assert no silence
 - `PrometheusRule` **plus** the circular-dependency documentation (ADR D11) — the rule is
   actively harmful shipped without it
 - Troubleshooting docs: `send_resolved`, `max_alerts` (ADR D8)
+- The `just ci` / e2e recipe gap (known open item 11)
 
 **Exit:** kill -9 during any phase of delivery never produces silence.
 
-**Docs:** `how-to/troubleshoot.md`, `explanation/failure-semantics.md`.
+**Docs:** `how-to/troubleshoot.md`, `explanation/failure-semantics.md` — both PR B.
 
 ---
 
@@ -423,23 +437,54 @@ a `/still-firing` slash command.
 9. **`alertthread_slack_auth_valid` is not in D11's metric list.** It exists because of item
    8 — the prober needs somewhere to put its verdict. Same class as item 7: D11 enumerated
    the metrics before the question it answers had been asked. Fold into ADR 003.
-10. **`just mutants` exits non-zero, and that is currently expected.** Phase 4 left 14
-    surviving mutants plus 2 timeouts, all in the app crate, all triaged in #12's body —
-    process lifecycle, log-only branches, and field accessors. AGENTS.md requires zero
-    survivors in `core` only, and `core` is clean; the recipe gates the whole workspace.
-    Do not add exclusions to silence these — they are killable in principle, unlike item 5's
-    equivalent mutant. Either kill them or narrow the recipe's gating to `core`, but decide
-    it deliberately: a red gate nobody expects to be green is how a real survivor slips in.
+10. ~~**`just mutants` exits non-zero, and that is currently expected.**~~ **Resolved in
+    Phase 5 PR A: the gate was narrowed, not excluded.** The recipe still runs
+    `--workspace` and still prints every survivor on every run; only its *exit code* is
+    scoped to `crates/core` and `crates/store`. The app crate's 14 survivors plus 2 timeouts
+    are therefore still in front of a reader, and a new one appears among them, but a correct
+    tree exits `0`.
+
+    Excluding them by name was considered and rejected. `--exclude-re` asserts a mutant is
+    *equivalent*, which is true of item 5's and false of these — they are unkilled, not
+    unkillable, and naming them would also suppress a genuinely new survivor arriving at the
+    same site. Both directions of the new gate were watched working before it landed: a
+    stubbed assertion in `Policy::validate`'s tests made it exit `1` naming the two core
+    survivors, and the app crate's existing `shutdown.rs` timeouts made it print three
+    survivors and exit `0`.
 11. **`just ci` runs neither the image job nor `just e2e`.** AGENTS.md says "CI runs these
     same recipes", which is not quite true for those two — both are CI-only. That gap let a
     real break reach CI once already (#12's image smoke test). Either fold them into a
     pre-push recipe or reword the claim.
-12. **Fail-fast startup auth conflicts with what the outbox promises.** The relay calls
-    `auth.test` at startup and refuses to start on failure (D11). Correct for a bad token —
-    but it means a relay restarted during a *transient* Slack outage will not come back,
-    even though the outbox exists to ride exactly that out. Found while wiring the demo,
-    where it made container ordering load-bearing. **Decide in Phase 5**: retry with backoff
-    at startup, or keep fail-fast and document it as intended.
+12. ~~**Fail-fast startup auth conflicts with what the outbox promises.**~~ **Resolved in
+    Phase 5 PR A: split on the D9 error taxonomy.** `SlackError::disposition` already answers
+    "will this ever succeed?", and startup now asks it rather than asking "did `auth.test`
+    work". `Disposition::Terminal` — `invalid_auth`, `account_inactive`, `token_revoked`, a
+    malformed token, an unusable `base_url` — still refuses to start, with no retry at all.
+    Everything else retries with bounded backoff for `slack.auth_startup_grace` (default 30 s)
+    and then starts anyway with `alertthread_slack_auth_valid = 0`, leaving the outbox and
+    the 15-minute prober to do their jobs.
+
+    D11's "fail fast on a bad token" is preserved exactly; what changed is that a Slack
+    outage is no longer treated as a bad token. Container ordering in the demo stack stops
+    being load-bearing as a side effect.
+
+13. **A dead-lettered op is recovered by an all-or-nothing sweep, not selectively.** Phase 5
+    PR A added `StateStore::revive_dead_letters`, fired by the auth prober on an
+    invalid→valid transition, and it returns *every* parked row rather than only the ones
+    parked for an auth reason. Reviving selectively would need the low-cardinality reason
+    persisted per row — an `outbox` column and a `dead_letter` signature change — and the
+    coarse version's cost is bounded and self-correcting: a row parked for `msg_too_long`
+    fails once more and re-parks, at one Slack call, on an event that only happens when a
+    human has just fixed something. Revisit if a deployment ever accumulates enough
+    permanently-unusable rows for that churn to matter.
+
+14. **Nothing revives a dead letter parked for a non-auth reason.** `channel_unusable` is the
+    case that will come up: an operator invites the bot to the channel and the alerts parked
+    before that stay parked, because no probe watches channel membership the way the auth
+    prober watches the token. The row and its payload survive, so recovery is possible by
+    hand; there is no supported command for it yet. Worth an operator-facing path — a
+    `/admin` endpoint behind PR B's bearer token, or a binary subcommand — decided
+    deliberately rather than bolted on.
 
 ## Process notes worth keeping
 

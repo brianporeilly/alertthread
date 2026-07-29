@@ -28,8 +28,8 @@ use chrono::{DateTime, TimeDelta, Utc};
 
 use crate::error::StoreError;
 use crate::model::{
-    AlertRecord, ColumnDef, Deferral, GroupMembership, GroupRecord, LeasedOp, OpEffect, OpId,
-    PruneStats, RetentionPolicy, StoreStats, WorkerId,
+    AlertRecord, ColumnDef, DeadLetter, Deferral, GroupMembership, GroupRecord, LeasedOp, OpEffect,
+    OpId, PruneStats, RetentionPolicy, StoreStats, WorkerId,
 };
 use crate::store::StateStore;
 
@@ -197,6 +197,14 @@ impl StateStore for Store {
         now: DateTime<Utc>,
     ) -> Result<(), StoreError> {
         forward!(self, s => s.dead_letter(id, reason, now))
+    }
+
+    async fn dead_letters(&self, limit: u32) -> Result<Vec<DeadLetter>, StoreError> {
+        forward!(self, s => s.dead_letters(limit))
+    }
+
+    async fn revive_dead_letters(&self, now: DateTime<Utc>) -> Result<u64, StoreError> {
+        forward!(self, s => s.revive_dead_letters(now))
     }
 
     async fn prune(
