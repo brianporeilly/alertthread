@@ -94,7 +94,12 @@ pub struct ReasonLabel {
 /// `{outcome}` on `alertthread_webhook_requests_total`.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct OutcomeLabel {
-    /// `accepted`, `rejected` or `store_unavailable`.
+    /// `accepted`, `rejected`, `store_unavailable`, `misconfigured`, `auth_missing` or
+    /// `auth_mismatch`.
+    ///
+    /// The two `auth_*` values come from [`crate::auth`] and are separated because the fix
+    /// differs: `auth_missing` is a sender with no credential configured at all, and
+    /// `auth_mismatch` is one whose credential is not the one this relay holds.
     pub outcome: &'static str,
 }
 

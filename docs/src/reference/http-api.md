@@ -5,12 +5,20 @@
 `alertthread` exposes four endpoints and nothing else. There is no admin API and no
 management port.
 
-| Method | Path | Purpose |
-|---|---|---|
-| `POST` | `/webhook` | Alertmanager webhook receiver |
-| `GET` | `/healthz` | Liveness |
-| `GET` | `/readyz` | Readiness |
-| `GET` | `/metrics` | Prometheus exposition |
+| Method | Path | Purpose | Authenticated |
+|---|---|---|---|
+| `POST` | `/webhook` | Alertmanager webhook receiver | Optionally, by `server.auth_token` |
+| `GET` | `/healthz` | Liveness | **Never** |
+| `GET` | `/readyz` | Readiness | **Never** |
+| `GET` | `/metrics` | Prometheus exposition | **Never** |
+
+**The three `GET` endpoints are unauthenticated even when the webhook is not.** That is a
+decision, not an omission: a kubelet probe carries no credentials, so a `401` on `/healthz` is a
+pod restarted for ever and a `401` on `/readyz` is a pod that never joins the Service; a `401`
+on `/metrics` breaks the relay's own alerting, which is the failure this project exists to
+prevent. None of the three reveals the contents of an alert. Close them at the network layer if
+you need them closed — see
+[Harden a deployment](../how-to/harden-a-deployment.md).
 
 ### `POST /webhook`
 
@@ -38,8 +46,50 @@ receivers:
 |---|---|---|---|
 | `200` | `ok` | The delivery is committed to the store | Nothing |
 | `400` | the parse error | The body is not an Alertmanager payload this build can read | Nothing — a retry cannot fix it |
+| `401` | `unauthorized` | `server.auth_token` is set and the delivery did not carry it | Nothing — it does not retry a `401` |
 | `503` | `could not persist the delivery; retry` | The store was unreachable | **Retry** |
 | `500` | `no channel: …` | No `?channel=` and no default | Retry; the relay is misconfigured |
+
+### Authentication
+
+Unauthenticated by default. When `server.auth_token` is set, every delivery must carry the
+credential:
+
+```
+Authorization: Bearer <server.auth_token>
+```
+
+```yaml
+receivers:
+  - name: alertthread
+    webhook_configs:
+      - url: http://alertthread.observability.svc:8080/webhook?channel=%23alerts
+        send_resolved: true
+        max_alerts: 0
+        http_config:
+          authorization:
+            type: Bearer
+            credentials_file: /etc/alertmanager/secrets/alertthread-webhook/token
+```
+
+The scheme is matched case-insensitively (RFC 7235) and the credential is compared in constant
+time. Every refusal is byte-for-byte identical — `401`, a bare `WWW-Authenticate: Bearer`, the
+body `unauthorized` — so a caller cannot tell a missing credential from a wrong one, or from one
+that is nearly right.
+
+The operator can. Each refusal increments
+`alertthread_webhook_requests_total{outcome="auth_missing"}` (no header, or one that was not a
+bearer credential) or `{outcome="auth_mismatch"}` (a bearer credential that is not the
+configured token), and logs at ERROR.
+
+⚠️ **A `401` loses the alerts in that delivery.** Alertmanager's webhook client retries `5xx`
+and `429`, not `4xx`. This is the second of the two statuses on this page that can lose an
+alert, and unlike the `400` it is caused by *configuration*: a token on one side and not the
+other. It is logged at ERROR and has its own alert rule
+(`AlertthreadWebhookUnauthenticated`) for that reason. The alternative — accepting a delivery
+that failed authentication — is not a trade this relay makes on your behalf.
+
+A `GET /webhook` is still `405`, not `401`: the wrong method is not a secret.
 
 **`200` means durable, not delivered.** The claim, the plan and the outbox rows are committed
 in one transaction before the response is written, and no Slack call happens in the handler
@@ -64,7 +114,7 @@ resolutions arrive as orphans. See [Troubleshoot](../how-to/troubleshoot.md).
 
 ### `GET /healthz`
 
-Liveness. Always `200 ok` while the process is running.
+Liveness. Always `200 ok` while the process is running, credential or no credential.
 
 **Deliberately does not check the store.** A brief database blip must not cause Kubernetes to
 restart a pod that is correctly buffering alerts — the outbox is exactly the machinery for
@@ -152,8 +202,9 @@ Not endpoints, but part of the running process and worth knowing about when read
 | Outbox worker | `worker.idle_poll` | Leases a batch, drains it by channel |
 | Metrics sampler | `worker.sample_interval` | Reads the store's queue depth and correlation-state size |
 | Retention pruner | `storage.retention.interval` | Deletes finished state ([ADR 001 D4](../adr/001-adr.md)) |
-| Auth prober | `slack.auth_probe_interval` | Re-checks the bot token |
+| Auth prober | `slack.auth_probe_interval` | Re-checks the bot token, and revives dead letters when it starts working |
+| Dead-letter reporter | `worker.sample_interval` | Announces every parked row once per process |
 
-All four stop on the same shutdown signal, and none of them waits out its interval first — an
+All five stop on the same shutdown signal, and none of them waits out its interval first — an
 hourly pruner that only checked after sleeping would keep a container alive for up to an hour
 past `SIGTERM`, and Kubernetes would `SIGKILL` it instead, mid-delivery.

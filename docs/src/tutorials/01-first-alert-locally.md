@@ -91,6 +91,9 @@ That stops every container and removes its data. Your machine is back to a clean
   the outcome and tears itself down.
 - To point the relay at a real Slack workspace, see
   [Configuration](../reference/configuration.md).
+- The demo stack already runs the relay the hardened way — read-only root filesystem, no
+  capabilities, and a bearer token on the webhook that Alertmanager sends. To do the same in a
+  cluster, see [Harden a deployment](../how-to/harden-a-deployment.md).
 - To understand *why* resolve does both an edit and a reply, and why alerts collapse into
   threads, see [Failure semantics](../explanation/failure-semantics.md) and
   [Fingerprint correlation](../explanation/fingerprint-correlation.md).

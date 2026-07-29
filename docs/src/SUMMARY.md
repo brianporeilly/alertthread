@@ -10,6 +10,8 @@
 
 - [Enable HA with PostgreSQL](how-to/enable-ha-postgres.md)
 - [Customize message templates](how-to/customize-templates.md)
+- [Harden a deployment](how-to/harden-a-deployment.md)
+- [Alert on the relay](how-to/alert-on-the-relay.md)
 - [Troubleshoot](how-to/troubleshoot.md)
 
 # Reference

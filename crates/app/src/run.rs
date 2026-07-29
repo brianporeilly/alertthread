@@ -14,6 +14,7 @@ use anyhow::Context as _;
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 
+use crate::auth::WebhookAuth;
 use crate::config::Config;
 use crate::http::{AppState, router};
 use crate::metrics::Metrics;
@@ -108,6 +109,7 @@ pub async fn start(config: Config) -> anyhow::Result<Relay> {
 
     let renderer = Arc::new(build_renderer(&config)?);
     let limits = Arc::new(SlackLimits::new(config.slack.rate_limit_divisor));
+    report_webhook_auth(&config.webhook_auth());
 
     let listener = TcpListener::bind(config.server.listen)
         .await
@@ -248,6 +250,46 @@ async fn authenticate(
          through a Slack outage is the one behaviour the outbox exists to make unnecessary"
     );
     Ok(false)
+}
+
+/// Says which side of the webhook perimeter this process came up on.
+///
+/// One line at startup, always, including the default case: "is the webhook authenticated?"
+/// is otherwise a question an operator can only answer by sending an unauthenticated request
+/// to their own production relay.
+fn report_webhook_auth(auth: &WebhookAuth) {
+    let (warn, message) = webhook_auth_report(auth);
+    if warn {
+        tracing::warn!("{message}");
+    } else {
+        tracing::info!("{message}");
+    }
+}
+
+/// Whether a webhook auth mode is worth a warning, and what to say about it.
+///
+/// Split from the emission so the wording is assertable: [`WebhookAuth::Blank`] behaves
+/// exactly like the default, so the warning naming the setting is the *only* thing that
+/// distinguishes "I did not configure a token" from "my token did not arrive".
+const fn webhook_auth_report(auth: &WebhookAuth) -> (bool, &'static str) {
+    match auth {
+        WebhookAuth::Required(_) => (
+            false,
+            "POST /webhook requires the bearer token in server.auth_token; /healthz, /readyz \
+             and /metrics do not",
+        ),
+        WebhookAuth::Open => (
+            false,
+            "POST /webhook is unauthenticated: server.auth_token is not set (ADR 001 D11 \
+             makes it optional)",
+        ),
+        WebhookAuth::Blank => (
+            true,
+            "server.auth_token is set to an empty value, so POST /webhook is unauthenticated. \
+             Set it to the credential Alertmanager sends, or remove it — an empty value is \
+             what a chart renders for a secret that did not resolve",
+        ),
+    }
 }
 
 /// Builds the Slack client from the validated configuration.
@@ -400,7 +442,8 @@ pub fn cancelled_token() -> CancelToken {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_renderer, cancelled_token, config_path, worker_id};
+    use super::{build_renderer, cancelled_token, config_path, report_webhook_auth, worker_id};
+    use crate::auth::{WebhookAuth, WebhookToken};
     use crate::config::Config;
     use alertthread_core::Fingerprint;
     use alertthread_slack::{AlertView, RenderRequest};
@@ -499,6 +542,35 @@ slack:
             "{MINIMAL}\ntemplates:\n  dir: /nonexistent/alertthread/templates\n"
         ));
         assert!(build_renderer(&config).is_err());
+    }
+
+    #[test]
+    fn every_webhook_auth_mode_is_announced_at_startup() {
+        // `Blank` behaves exactly like the default, so this warning is the only thing that
+        // tells an operator their secret did not arrive. It has to name the setting.
+        let (warn, message) = super::webhook_auth_report(&WebhookAuth::Blank);
+        assert!(warn, "an empty auth token is a warning, not an info line");
+        assert!(message.contains("server.auth_token"), "{message}");
+        assert!(message.contains("unauthenticated"), "{message}");
+
+        let (warn, message) = super::webhook_auth_report(&WebhookAuth::Open);
+        assert!(!warn, "the documented default is not a warning");
+        assert!(message.contains("unauthenticated"), "{message}");
+
+        let (warn, message) =
+            super::webhook_auth_report(&WebhookAuth::Required(WebhookToken::new("s3cret")));
+        assert!(!warn);
+        assert!(message.contains("requires"), "{message}");
+        // The three endpoints the token never covers are named where somebody reading a
+        // startup log will see them.
+        for open in ["/healthz", "/readyz", "/metrics"] {
+            assert!(message.contains(open), "{message}");
+        }
+        assert!(!message.contains("s3cret"), "{message}");
+
+        // And the emitting side runs, at both levels.
+        report_webhook_auth(&WebhookAuth::Blank);
+        report_webhook_auth(&WebhookAuth::Open);
     }
 
     #[test]

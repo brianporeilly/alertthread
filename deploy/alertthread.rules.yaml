@@ -1,0 +1,316 @@
+# Prometheus alerting rules for alertthread itself.
+#
+# ⚠️ READ THIS BEFORE APPLYING THE FILE. ⚠️
+#
+# THE RELAY CANNOT ALERT ON ITSELF THROUGH ITSELF (ADR 001 D11).
+#
+# Every rule below describes a way the relay stops delivering alerts to Slack.
+# Routing them through the relay means the notification that says "alerts are not
+# reaching Slack" is itself an alert that will not reach Slack. Shipping these
+# rules without a route that bypasses the relay is WORSE than shipping no rules:
+# it creates the appearance of monitoring where there is none.
+#
+# So these rules are only half of the deliverable. The other half is an
+# Alertmanager route sending them to a DIRECT Slack receiver:
+#
+#     route:
+#       routes:
+#         - matchers: [ 'alertname=~"Alertthread.*"' ]
+#           receiver: slack-direct        # slack_configs, NOT the relay
+#           continue: false
+#
+#     receivers:
+#       - name: slack-direct
+#         slack_configs:
+#           - channel: "#alerts-meta"
+#             api_url_file: /etc/alertmanager/secrets/slack-webhook
+#
+# Match on `alertname=~"Alertthread.*"` rather than on `job="alertthread"`.
+# Both work, and every alert here does carry `job` — the aggregations are written
+# `by (job, instance)` deliberately so it survives, because a bare `sum()` drops
+# it and would silently unroute the alert. The alertname matcher cannot be broken
+# that way by a later edit to an expression, which is why it is the recommended
+# one. Full instructions: docs/src/how-to/alert-on-the-relay.md
+#
+# ── Format ───────────────────────────────────────────────────────────────────
+# This is a plain Prometheus rules file, deliberately: `promtool check rules`
+# validates it (`just check-rules`, and its own CI job), and a Helm chart embeds
+# `groups:` verbatim under a PrometheusRule's `.spec`. Phase 6 does that
+# packaging; until then, wrap it by hand as the how-to shows.
+#
+# Every metric named here is asserted to exist in the relay's own exposition by
+# crates/app/tests/prometheus_rule.rs, so a renamed metric fails the build rather
+# than producing a rule that can never fire.
+#
+# Thresholds are starting points for a homelab-to-small-cluster alert volume, not
+# measurements. `alertthread_outbox_oldest_age_seconds > 300` is the one to tune
+# first; see ROADMAP known open item 18.
+
+groups:
+  - name: alertthread.delivery
+    rules:
+      # THE primary signal. ADR 001 D11: "outbox_oldest_age_seconds is the metric
+      # that actually means 'alerts are not reaching Slack'. It is the one to alert
+      # on, more than error counters." Everything else in this file is a cause;
+      # this is the symptom, and it fires whatever the cause turns out to be —
+      # including causes nobody has thought of yet.
+      - alert: AlertthreadOutboxNotDraining
+        expr: max by (job, instance) (alertthread_outbox_oldest_age_seconds) > 300
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "alertthread is not delivering alerts to Slack"
+          description: >-
+            The oldest undelivered row in alertthread's outbox has been waiting
+            {{ $value | humanizeDuration }} on {{ $labels.instance }}. Alerts have been
+            accepted from Alertmanager and are not reaching Slack. This is the primary
+            delivery SLO signal; check alertthread_slack_calls_total by outcome and the
+            relay's logs for the reason.
+          runbook_url: "https://github.com/brianporeilly/alertthread/blob/main/docs/src/how-to/troubleshoot.md"
+
+      # Every increment is an alert nobody was told about. There is no lower
+      # threshold worth setting than "one".
+      - alert: AlertthreadDeadLetter
+        expr: sum by (job, instance) (increase(alertthread_dead_letter_total[15m])) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "alertthread parked an alert it could not deliver"
+          description: >-
+            alertthread dead-lettered {{ $value | printf "%.0f" }} outbox operation(s) in the
+            last 15 minutes on {{ $labels.instance }}. Every one is an alert nobody was told
+            about. The payload is in the relay's ERROR log, and the row is still in the
+            outbox table; the reason label on alertthread_dead_letter_total says why.
+          runbook_url: "https://github.com/brianporeilly/alertthread/blob/main/docs/src/how-to/troubleshoot.md"
+
+      # Rows that are parked and staying parked. The counter above fires once;
+      # this is what says nothing has cleared them since.
+      - alert: AlertthreadDeadLettersStillParked
+        expr: max by (job, instance) (alertthread_outbox_dead_lettered) > 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "alertthread still holds parked alerts"
+          description: >-
+            {{ $value | printf "%.0f" }} outbox row(s) have been parked on {{ $labels.instance }}
+            for over an hour. Rows parked for an auth reason are revived automatically when the
+            bot token starts working again; anything else needs a human. Nothing will ever
+            lease these rows on its own.
+
+      - alert: AlertthreadOutboxBacklog
+        expr: sum by (job, instance) (alertthread_outbox_depth) > 500
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "alertthread's outbox is filling faster than it drains"
+          description: >-
+            {{ $value | printf "%.0f" }} operations are queued on {{ $labels.instance }}. Slack
+            allows roughly one chat.postMessage per second per channel, so a sustained backlog
+            means the alert volume is above what one channel can absorb. Consider more
+            channels, or slack.rate_limit_divisor if you are running replicas.
+
+  - name: alertthread.slack
+    rules:
+      # PR A's startup split means a rejected token refuses to start, and a Slack
+      # outage starts anyway with this gauge at 0. Either way, queued alerts are
+      # not being delivered until it goes back to 1.
+      - alert: AlertthreadSlackTokenRejected
+        expr: min by (job, instance) (alertthread_slack_auth_valid) == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Slack is not accepting alertthread's bot token"
+          description: >-
+            The last auth.test from {{ $labels.instance }} was rejected or unreachable. Queued
+            alerts will not be delivered until this clears. Replacing a revoked token also
+            revives everything the relay parked while it was broken
+            (alertthread_dead_letter_revived_total counts it).
+          runbook_url: "https://github.com/brianporeilly/alertthread/blob/main/docs/src/reference/slack-errors.md"
+
+      - alert: AlertthreadSlackCallsFailing
+        expr: |
+          sum by (job, instance) (rate(alertthread_slack_calls_total{outcome!="ok"}[15m]))
+            / sum by (job, instance) (rate(alertthread_slack_calls_total[15m])) > 0.1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 10% of alertthread's Slack calls are failing"
+          description: >-
+            {{ $value | humanizePercentage }} of Slack Web API calls from {{ $labels.instance }}
+            are failing. The outbox retries, so this is not silence yet — but the failures are
+            what precede a dead letter. Break it down by the outcome label.
+
+      # Slack pushing back, as opposed to the relay pacing itself (source="local",
+      # which is normal during a storm and deliberately not alerted on).
+      - alert: AlertthreadRateLimitedBySlack
+        expr: sum by (job, instance) (rate(alertthread_rate_limited_total{source="slack"}[30m])) > 0.05
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Slack is rate-limiting alertthread"
+          description: >-
+            Slack has been returning 429 to {{ $labels.instance }} for half an hour. The relay
+            honours Retry-After and does not burn attempts on it, so alerts are late rather
+            than lost. If you run replicas, set slack.rate_limit_divisor to the replica count.
+
+      # A broken template. Degraded, not silent — the message went out, built from
+      # the hardcoded fallback — but the ConfigMap somebody applied is not in effect.
+      - alert: AlertthreadTemplateFallback
+        expr: sum by (job, instance) (increase(alertthread_fallback_posts_total[30m])) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "alertthread is posting messages from its hardcoded fallback"
+          description: >-
+            A message template failed to render on {{ $labels.instance }}
+            ({{ $value | printf "%.0f" }} time(s) in 30 minutes) and the built-in minimal
+            message was posted instead. Alerting still works; the template override does not.
+            The relay's ERROR log names the template and the line.
+          runbook_url: "https://github.com/brianporeilly/alertthread/blob/main/docs/src/how-to/customize-templates.md"
+
+  - name: alertthread.ingest
+    rules:
+      # ADR 001 D8's footgun, reported by Alertmanager itself at the moment it
+      # happens rather than inferred later from a rising orphan count.
+      - alert: AlertthreadAlertsTruncated
+        expr: sum by (job, instance) (increase(alertthread_alerts_truncated_total[15m])) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Alertmanager is truncating alerts out of alertthread's webhook body"
+          description: >-
+            {{ $value | printf "%.0f" }} alert(s) were dropped by Alertmanager before reaching
+            {{ $labels.instance }}. max_alerts on the webhook_config MUST be 0. Truncated
+            alerts are never tracked, so their resolutions arrive later as orphans with no
+            correlation.
+          runbook_url: "https://github.com/brianporeilly/alertthread/blob/main/docs/src/how-to/troubleshoot.md"
+
+      - alert: AlertthreadOrphanResolves
+        expr: sum by (job, instance) (increase(alertthread_orphan_resolves_total[1h])) > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "alertthread is receiving resolutions it has no state for"
+          description: >-
+            {{ $value | printf "%.0f" }} resolution(s) arrived at {{ $labels.instance }} with no
+            correlation state behind them in the last hour, so they posted as standalone
+            messages. Expected after a restart or past storage.retention.resolved; sustained
+            with neither, it is the signature of a non-zero max_alerts.
+
+      # A body this build cannot parse. The one path that loses an alert by design.
+      - alert: AlertthreadWebhookBodyRejected
+        expr: sum by (job, instance) (increase(alertthread_webhook_requests_total{outcome="rejected"}[15m])) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "alertthread rejected a webhook body it could not parse"
+          description: >-
+            {{ $labels.instance }} answered 400 to a delivery it could not read. A retry cannot
+            fix it, so the alerts in that body are lost. Usually something other than
+            Alertmanager posting to /webhook; the ERROR log has the parse error.
+
+      # Sustained 503s. Alertmanager does retry these, so a short burst is the
+      # outbox design working — but it gives up eventually.
+      - alert: AlertthreadStoreUnavailableAtIngest
+        expr: sum by (job, instance) (increase(alertthread_webhook_requests_total{outcome="store_unavailable"}[15m])) > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "alertthread cannot persist deliveries"
+          description: >-
+            {{ $labels.instance }} has been answering 503 for ten minutes because its state
+            store is unreachable. Alertmanager retries a 503, but not for ever. Check
+            storage.url, the database, and alertthread_store_sample_ok.
+
+      # Somebody is posting alerts this relay refuses. Both auth outcomes, because
+      # either way a delivery arrived and was not accepted.
+      - alert: AlertthreadWebhookUnauthenticated
+        expr: |
+          sum by (job, instance) (
+            increase(alertthread_webhook_requests_total{outcome=~"auth_missing|auth_mismatch"}[15m])
+          ) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "alertthread is refusing webhook deliveries for missing or wrong credentials"
+          description: >-
+            {{ $value | printf "%.0f" }} delivery(ies) to {{ $labels.instance }} were answered
+            401 in 15 minutes. If that is your own Alertmanager, the alerts in those deliveries
+            are lost — it does not retry a 401. Compare server.auth_token with the
+            http_config.authorization.credentials on the receiver. The outcome label separates
+            "no credential sent" (auth_missing) from "wrong credential" (auth_mismatch).
+          runbook_url: "https://github.com/brianporeilly/alertthread/blob/main/docs/src/how-to/harden-a-deployment.md"
+
+  - name: alertthread.process
+    rules:
+      - alert: AlertthreadDown
+        expr: up{job="alertthread"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "alertthread is down"
+          description: >-
+            Prometheus cannot scrape {{ $labels.instance }}. While it is down, Alertmanager's
+            webhook POSTs fail; it retries a few times and then gives up, so alerts fired
+            during this window are lost. This is the alert that most needs a route bypassing
+            the relay.
+
+      # The rules above all evaluate to nothing if the metrics stop existing, so
+      # this is the one that notices the target disappearing entirely — a deleted
+      # ServiceMonitor, a renamed job, a relabelled scrape.
+      - alert: AlertthreadAbsent
+        expr: absent(up{job="alertthread"})
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "alertthread has no scrape target at all"
+          description: >-
+            Nothing is reporting up{job="alertthread"}. Every other rule in this group is
+            silent while that is true, so treat this as the deadman for the rest of the file.
+
+      # The store gauges are sampled in the background and served from the last
+      # sample. A sample that stopped succeeding means those numbers are stale,
+      # including the outbox age this file's primary alert reads.
+      - alert: AlertthreadStoreSampleFailing
+        expr: min by (job, instance) (alertthread_store_sample_ok) == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "alertthread cannot sample its own store"
+          description: >-
+            The background store sample on {{ $labels.instance }} has been failing, so
+            alertthread_outbox_depth, alertthread_outbox_oldest_age_seconds,
+            alertthread_outbox_dead_lettered and alertthread_tracked_fingerprints are stale.
+            They keep their last values rather than being zeroed, which is why this metric
+            exists: without it, "the queue is empty" and "we stopped looking" read identically.
+
+      # Not a failure. It fires when the relay has just delivered alerts it had
+      # already given up on, which is worth knowing about before somebody asks why
+      # a two-hour-old alert just appeared in the channel.
+      - alert: AlertthreadDeadLettersRevived
+        expr: sum by (job, instance) (increase(alertthread_dead_letter_revived_total[15m])) > 0
+        for: 0m
+        labels:
+          severity: info
+        annotations:
+          summary: "alertthread returned parked alerts to its queue"
+          description: >-
+            {{ $value | printf "%.0f" }} previously parked operation(s) were revived on
+            {{ $labels.instance }} after the bot token started working again. Expect late
+            alerts in the channel — late is the point, because the alternative is never.

@@ -186,8 +186,8 @@ If you cannot tell which side something falls on, it is a decision. Supersede it
 
 ## Commands
 
-`just` is the only entry point. **CI runs these same recipes**, so if it passes locally it
-passes in CI.
+`just` is the only entry point, and **every CI job invokes one of these recipes** rather than
+spelling the flags out again in a workflow file.
 
 ```
 just fmt        # rustfmt
@@ -199,11 +199,22 @@ just coverage   # report only, no gate — for finding the gaps
 just mutants    # mutation testing; required for core changes
 just docs       # mdbook build + link check
 just up/down    # compose dev stack (podman or docker, auto-detected)
-just ci         # everything CI runs, including the coverage gate
+just e2e        # the asserted end-to-end demo (needs a container engine)
+just ci         # the fast half of CI: lint, test + coverage gate, docs, licences
+just pre-push   # ci + the alert-rule check + the image build + e2e
 ```
 
-Run `just ci` before proposing a change. Do not hand-run `cargo` commands that a recipe
-already wraps — the recipe carries the flags CI uses.
+**`just ci` is not all of CI, and saying it was cost us a break in `main` once.** Three jobs
+need a container engine and are separate recipes — the image build, `just e2e`, and the
+`promtool` check on `deploy/alertthread.rules.yaml`. `just pre-push` is `ci` plus those three,
+and it fails with a legible message when no engine is present rather than skipping them.
+
+**Run `just pre-push` before proposing a change.** Two CI jobs are still outside it and have to
+be run by hand when relevant: `just test-pg` (needs `just up`, and `pre-push` will not tear
+down a dev stack to get it) and the MSRV job (needs the 1.94 toolchain installed).
+
+Do not hand-run `cargo` commands that a recipe already wraps — the recipe carries the flags CI
+uses.
 
 ---
 
@@ -233,9 +244,21 @@ Real ones, discovered the hard way. Each has cost somebody time.
 - **Alertmanager `max_alerts` must be `0`** and `send_resolved` must be `true`. Non-zero
   `max_alerts` silently truncates alerts out of the webhook body, and the symptom
   (orphaned resolves) points nowhere near the cause.
-- **The relay cannot alert on itself through itself.** Its `PrometheusRule` requires a
-  documented Alertmanager route to a *direct* Slack receiver. Shipping the rule without
-  that documentation is worse than shipping no rule.
+- **The relay cannot alert on itself through itself.** `deploy/alertthread.rules.yaml` requires
+  a documented Alertmanager route to a *direct* Slack receiver
+  ([`how-to/alert-on-the-relay.md`](docs/src/how-to/alert-on-the-relay.md)). Shipping the rules
+  without that documentation is worse than shipping no rules. The warning lives in the YAML
+  itself as well as in the docs, because that file travels into charts and clusters on its own,
+  and a test asserts it is still there.
+- **The container runs read-only, and SQLite is the only reason that needs thought.** The
+  database, its `-wal` and its `-shm` all live beside `storage.url` and need a declared writable
+  mount; `/tmp` needs one too, for the spill file a large SQLite statement would want. If a
+  read-only rootfs breaks something, the fix is another declared mount, never relaxing the flag.
+  `compose.yaml` runs the relay under the full set of flags, so `just e2e` proves them.
+- **`/healthz`, `/readyz` and `/metrics` are never authenticated.** A probe carries no
+  credential, so a `401` on the first two is a pod Kubernetes restarts for ever or one that never
+  joins the Service, and a `401` on `/metrics` breaks the relay's own alerting. Only
+  `POST /webhook` can be closed, and only when `server.auth_token` is set.
 
 ---
 
@@ -250,7 +273,8 @@ Real ones, discovered the hard way. Each has cost somebody time.
 
 ## Definition of done
 
-1. `just ci` passes — including the per-crate coverage gate.
+1. `just pre-push` passes — `ci` including the per-crate coverage gate, plus the alert-rule
+   check, the image build and the end-to-end demo.
 2. Tests exist per the table above, and fail without the change.
 3. `just mutants` exits `0` — no surviving mutants in `core` or `store`, and any new
    survivor it prints elsewhere is triaged in the PR.

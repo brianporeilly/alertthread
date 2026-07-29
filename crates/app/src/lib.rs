@@ -15,6 +15,7 @@
 //! | Module | What |
 //! |---|---|
 //! | [`config`] | figment layering, and the three settings that refuse to start |
+//! | [`auth`] | the optional bearer token on `POST /webhook`, and what it never covers |
 //! | [`http`] | the four endpoints, including why `/readyz` diverges from ADR 001 D11 |
 //! | [`worker`] | the outbox loop: lease, fan out by channel, drain each serially |
 //! | [`delivery`] | one op, one Slack call, and ADR 001 D9's failure table |
@@ -22,6 +23,7 @@
 //! | [`metrics`] | ADR 001 D11, and why its gauges are sampled rather than queried |
 //! | [`run`] | startup wiring, kept out of `main.rs` so it can be tested |
 
+pub mod auth;
 pub mod config;
 pub mod delivery;
 pub mod http;

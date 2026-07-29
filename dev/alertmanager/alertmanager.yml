@@ -30,3 +30,12 @@ receivers:
       - url: "http://relay:8080/webhook?channel=%23alerts"
         send_resolved: true
         max_alerts: 0
+        # The relay's optional bearer token (ADR 001 D11), on in this stack so the
+        # end-to-end job exercises it. It must equal ALERTTHREAD_SERVER__AUTH_TOKEN
+        # on the relay service in compose.yaml; when it does not, the relay answers
+        # 401 and Alertmanager does NOT retry — the alerts in that delivery are
+        # lost. Use `credentials_file` in a real deployment and mount a secret.
+        http_config:
+          authorization:
+            type: Bearer
+            credentials: "demo-webhook-token-not-a-secret"

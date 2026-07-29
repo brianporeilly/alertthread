@@ -35,9 +35,23 @@ until the token is replaced — see [why it is a metric and not readiness](#why-
 rather than passed through: that string comes from outside the relay, and a label value the
 sender controls is an unbounded label value. The raw string reaches the log line instead.
 
-`outcome` is `accepted`, `rejected` (a body this build cannot parse — `400`, and the alerts
-in it are lost), `store_unavailable` (`503`, and Alertmanager will redeliver), or
-`misconfigured`.
+`outcome` is one of six values, and three of them mean an alert was lost:
+
+| `outcome` | Status | Lost? |
+|---|---|---|
+| `accepted` | `200` | No — committed to the store |
+| `rejected` | `400` | **Yes** — a body this build cannot parse, and a retry cannot fix it |
+| `auth_missing` | `401` | **Yes** — no `Authorization` header, or one that was not a `Bearer` credential |
+| `auth_mismatch` | `401` | **Yes** — a bearer credential that is not `server.auth_token` |
+| `store_unavailable` | `503` | No — Alertmanager redelivers |
+| `misconfigured` | `500` | No — Alertmanager retries; the relay has no channel to post to |
+
+The two `auth_*` values are separate because the fix differs: `auth_missing` is a sender with no
+credential configured at all (or a proxy stripping the header), `auth_mismatch` is a sender whose
+credential has drifted from the relay's. They are **not** distinguishable from the outside — every
+refusal is an identical `401` — which is the point of splitting them here. Both are logged at
+ERROR, because Alertmanager does not retry a `401`. See
+[Harden a deployment](../how-to/harden-a-deployment.md).
 
 `alertthread_orphan_resolves_total` rising **with no restarts** is the signature of a non-zero
 `max_alerts` on the Alertmanager side. That is exactly why `alertthread_alerts_truncated_total`
@@ -183,13 +197,25 @@ ingest. There is no healthy pod to route to, so shedding traffic fixes nothing.
 So the token is watched, and the answer is a metric. Alert on
 `alertthread_slack_auth_valid == 0`.
 
+## The shipped alert rules
+
+`deploy/alertthread.rules.yaml` is a Prometheus rules file covering every metric above that
+means something is wrong. `promtool check rules` validates it (`just check-rules`, and its own
+CI job), and a unit test asserts that every metric and label value it names is one this build
+actually exports — a rule on a metric that does not exist never fires and looks exactly like a
+healthy relay.
+
+`AlertthreadOutboxNotDraining` is the primary one, on
+`alertthread_outbox_oldest_age_seconds`, for the reason at the top of this page.
+
 ## ⚠️ The relay cannot alert on itself through itself
 
 If the relay is down, an alert about the relay being down cannot be delivered *by* the relay.
-Any `PrometheusRule` shipped for `alertthread` **must** be accompanied by an Alertmanager
-route sending `job=alertthread` alerts to a **direct Slack receiver**, bypassing the relay
-entirely.
+The shipped rules **must** be accompanied by an Alertmanager route sending them to a **direct
+Slack receiver**, bypassing the relay entirely — match on `alertname=~"Alertthread.*"`, which
+no aggregation can drop, or on `job=alertthread`.
 
-Shipping the rule without that route is worse than shipping no rule at all, because it
+Shipping the rules without that route is worse than shipping no rules at all, because it
 creates the appearance of monitoring where there is none. This is the single most important
-operational note in the project.
+operational note in the project, and [Alert on the relay](../how-to/alert-on-the-relay.md) is
+the page that walks it — including how to prove the bypass works before you need it.

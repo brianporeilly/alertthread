@@ -205,6 +205,25 @@ docs:
 check-links:
     ./scripts/check-links.sh
 
+# Validate deploy/alertthread.rules.yaml with promtool, from the Prometheus image.
+#
+# The rules are a shipped artefact and PromQL is not compiled by anything else in
+# this repo, so without this a syntax error reaches a cluster. promtool comes from
+# the same pinned Prometheus image the demo stack runs, which is why this needs a
+# container engine and therefore cannot live in `just ci`.
+#
+# The other half of the check is in Rust: crates/app/tests/prometheus_rule.rs
+# asserts every metric and label value the rules name is one this build exports,
+# which promtool cannot know.
+#
+# Validate the shipped Prometheus alert rules.
+[private]
+check-rules: check-engine
+    {{ engine }} run --rm \
+        -v {{ justfile_directory() }}/deploy:/rules:ro,z \
+        --entrypoint promtool \
+        docker.io/prom/prometheus:v3.1.0 check rules /rules/alertthread.rules.yaml
+
 # ---------------------------------------------------------------------------
 # Dev stack
 # ---------------------------------------------------------------------------
@@ -298,8 +317,32 @@ e2e: check-engine
 # CI
 # ---------------------------------------------------------------------------
 
-# Everything CI runs, including the coverage gate.
+# NOT all of CI. Three jobs need a container engine and are separate recipes —
+# `image`, `e2e` and `check-rules` — so that this one stays usable in a tight
+# loop. `just pre-push` is the full local equivalent.
+#
+# The fast half of CI: lint, tests + the coverage gate, docs, licences.
 ci: lint test docs
     cargo deny check
     @echo
-    @echo "just ci: all checks passed."
+    @echo "just ci: all checks passed. This is not all of CI — see 'just pre-push'."
+
+# This exists because `just ci` passing was documented as meaning CI passes, and it
+# did not: the image job and the end-to-end job were CI-only, and that gap let a
+# real break reach CI once (ROADMAP known open item 11).
+#
+# `check-engine` is first so a missing container engine fails immediately with a
+# legible message rather than after the several minutes `ci` takes — and fails
+# rather than skipping. A check that quietly passes is the failure mode this
+# project keeps legislating against.
+#
+# Two CI jobs remain outside it, deliberately: `test-pg` needs the compose stack
+# up and would tear down a running dev stack to get it, and the MSRV job needs the
+# 1.94 toolchain installed. Run those two by hand — `just up && just test-pg` —
+# when you touch the store or reach for a newer language feature.
+#
+# Everything CI runs that one machine can: `ci` plus the three container jobs.
+pre-push: check-engine check-rules ci image e2e
+    @echo
+    @echo "just pre-push: rules + ci + image + e2e all passed."
+    @echo "Not covered here: 'just test-pg' (needs 'just up') and the MSRV job."
