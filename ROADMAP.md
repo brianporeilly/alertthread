@@ -11,7 +11,7 @@ the tree in a state where the next phase is the only thing that makes it work.
 
 ## Current status
 
-*Last updated 2026-07-22. Keep this current — it is the first thing anyone picking the
+*Last updated 2026-07-28. Keep this current — it is the first thing anyone picking the
 project up will read, and git log does not distinguish "in review" from "abandoned".*
 
 | Phase | State |
@@ -22,8 +22,8 @@ project up will read, and git log does not distinguish "in review" from "abandon
 | 3 — Slack layer | ✅ merged (#7) |
 | ↳ group labels | ✅ built — `group_message.group_labels`, both backends |
 | 4 — Wiring, PR A | ✅ merged (#12) — the walking skeleton |
-| **4 — Wiring, PR B** | 🔵 **built — the mock UI, the compose demo, the tutorial; the exit criterion is now an asserted CI job** |
-| 5 — Hardening | ⬜ not started |
+| 4 — Wiring, PR B | ✅ merged (#13) — mock UI, compose demo, tutorial; the exit criterion is an asserted CI job |
+| **5 — Hardening** | ⬜ **not started — next** |
 | 6 — Release | ⬜ not started |
 
 ADRs [001](docs/src/adr/001-adr.md) and [002](docs/src/adr/002-implementation-gaps.md) are
@@ -423,6 +423,23 @@ a `/still-firing` slash command.
 9. **`alertthread_slack_auth_valid` is not in D11's metric list.** It exists because of item
    8 — the prober needs somewhere to put its verdict. Same class as item 7: D11 enumerated
    the metrics before the question it answers had been asked. Fold into ADR 003.
+10. **`just mutants` exits non-zero, and that is currently expected.** Phase 4 left 14
+    surviving mutants plus 2 timeouts, all in the app crate, all triaged in #12's body —
+    process lifecycle, log-only branches, and field accessors. AGENTS.md requires zero
+    survivors in `core` only, and `core` is clean; the recipe gates the whole workspace.
+    Do not add exclusions to silence these — they are killable in principle, unlike item 5's
+    equivalent mutant. Either kill them or narrow the recipe's gating to `core`, but decide
+    it deliberately: a red gate nobody expects to be green is how a real survivor slips in.
+11. **`just ci` runs neither the image job nor `just e2e`.** AGENTS.md says "CI runs these
+    same recipes", which is not quite true for those two — both are CI-only. That gap let a
+    real break reach CI once already (#12's image smoke test). Either fold them into a
+    pre-push recipe or reword the claim.
+12. **Fail-fast startup auth conflicts with what the outbox promises.** The relay calls
+    `auth.test` at startup and refuses to start on failure (D11). Correct for a bad token —
+    but it means a relay restarted during a *transient* Slack outage will not come back,
+    even though the outbox exists to ride exactly that out. Found while wiring the demo,
+    where it made container ordering load-bearing. **Decide in Phase 5**: retry with backoff
+    at startup, or keep fail-fast and document it as intended.
 
 ## Process notes worth keeping
 
