@@ -7,6 +7,11 @@ name: Mutation testing
 # Coverage proves a line ran. It does not prove a test would have caught the
 # regression, and for a system whose worst failure mode is silence, "would we
 # have noticed?" is the only question worth asking.
+#
+# `just mutants` runs the whole workspace and prints every survivor; its exit
+# code covers `crates/core` and `crates/store` (ROADMAP known open item 10). So
+# this job failing means a mutant survived where none may, and the uploaded
+# `mutants.out/` is where the rest are — read it even on a green run.
 on:
   schedule:
     - cron: "0 3 * * *"

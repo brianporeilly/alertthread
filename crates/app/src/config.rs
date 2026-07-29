@@ -200,6 +200,19 @@ pub struct SlackConfig {
     /// `/readyz` — see [`crate::http`] for why.
     #[serde(with = "duration")]
     pub auth_probe_interval: TimeDelta,
+    /// How long to keep retrying a *transient* startup `auth.test` before starting anyway.
+    ///
+    /// A token Slack definitively rejects still refuses to start, whatever this is set to
+    /// (ADR 001 D9's terminal errors, ADR 001 D11's fail-fast). This bounds only the other
+    /// case: a relay restarted during a Slack outage, a DNS blip or a proxy 503, where
+    /// refusing to start is refusing to accept the webhooks the outbox exists to hold.
+    ///
+    /// It is a bound rather than an unlimited retry because a pod stuck in startup is
+    /// invisible to `/readyz` and to `/metrics` alike, so "keep trying" is indistinguishable
+    /// from "hung". Past it the relay starts with `alertthread_slack_auth_valid = 0` and
+    /// lets the 15-minute prober report recovery.
+    #[serde(with = "duration")]
+    pub auth_startup_grace: TimeDelta,
 }
 
 impl Default for SlackConfig {
@@ -212,6 +225,9 @@ impl Default for SlackConfig {
             timeout: TimeDelta::seconds(15),
             rate_limit_divisor: 1.0,
             auth_probe_interval: TimeDelta::minutes(15),
+            // Comfortably inside a default Kubernetes startup budget, and long enough to
+            // ride out the blips that make up most of them.
+            auth_startup_grace: TimeDelta::seconds(30),
         }
     }
 }

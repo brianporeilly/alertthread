@@ -54,6 +54,7 @@ reported by the sender itself at the moment it happens. Correlate the two.
 | `alertthread_rate_limited_total` | counter | `method`, `source` | Deliveries deferred by a rate limit |
 | `alertthread_fallback_posts_total` | counter | `reason` | Messages built from the hardcoded fallback |
 | `alertthread_dead_letter_total` | counter | `reason` | **Operations parked. Page on this.** |
+| `alertthread_dead_letter_revived_total` | counter | — | Parked operations returned to the queue |
 
 `method` is Slack's own spelling — `chat.postMessage`, `chat.update`, `auth.test` — so the
 metric can be correlated with Slack's documentation without a translation step.
@@ -68,6 +69,31 @@ the stuck row's `last_error`.
 broken and the message that went out was the built-in minimal one — degraded, but not silent.
 
 `reason` on `dead_letter` is the same closed set as `outcome`, plus `alert_row_missing`.
+
+### What happens to a parked operation
+
+Parking is not the end of the alert's life, and this is the part the counter alone does not
+tell you.
+
+- **It is logged twice, deliberately.** Once at ERROR by the worker at the moment it parks,
+  with the payload, and again at ERROR by the background reporter — which announces every
+  parked row **once per process**. That second line is the one that matters: the first is
+  gone from your log retention by the time anybody is paged, and it does not come back on a
+  restart. The reporter's does.
+- **It stays in the `outbox` table.** The row is the only record of an alert that never
+  reached Slack, and deleting it would erase the evidence of the one failure mode this
+  project treats as unacceptable.
+- **It is returned to the queue if the bot token starts working again.** `invalid_auth` is a
+  reason [ADR 001 D9](../adr/001-adr.md) parks immediately, and the background auth probe
+  seeing the token go from rejected to accepted is the event that says the reason has gone.
+  Everything parked is revived at that point and `alertthread_dead_letter_revived_total`
+  counts it. Those alerts are late — late is the point, because the alternative is never.
+
+An operation parked for a reason the token has nothing to do with (`msg_too_long`,
+`channel_unusable`) is revived by the same sweep, fails once more, and re-parks. That costs
+one Slack call on an event that only happens when a human has just fixed something, and it
+is the direction this project errs in: the cost of not reviving a row that should have been
+is an alert nobody hears about.
 
 ### `source` on `alertthread_rate_limited_total`
 
@@ -129,9 +155,15 @@ its store is unreachable. This is the metric that says the numbers are stale.
 |---|---|---|---|
 | `alertthread_slack_auth_valid` | gauge | — | `1` if Slack accepted the bot token at the last check |
 
-**Not in D11.** The relay calls `auth.test` once at startup and refuses to start on a bad
-token, and then re-checks every `slack.auth_probe_interval` (default 15 minutes). 96 calls a
-day is negligible.
+**Not in D11.** The relay calls `auth.test` at startup and then re-checks every
+`slack.auth_probe_interval` (default 15 minutes). 96 calls a day is negligible.
+
+The startup check splits on *why* it failed rather than on whether it failed. A token Slack
+definitively rejects refuses to start; a Slack the relay cannot reach retries for up to
+[`slack.auth_startup_grace`](configuration.md#slackauth_startup_grace) and then starts anyway
+with this gauge at `0`. The reasoning is the same as the readiness argument below: a relay
+that will not start during a Slack outage loses every alert fired during it, from a condition
+the outbox exists to survive.
 
 ### Why a revoked token does not make the relay unready
 

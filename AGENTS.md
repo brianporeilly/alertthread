@@ -120,7 +120,15 @@ Coverage proves a line ran. It does not prove a test would have caught the regre
 `cargo-mutants` closes that gap by breaking the code and checking that something fails.
 
 - **Required for any change to `alertthread-core`**: `just mutants`, no surviving mutants.
-- Runs nightly across the workspace; elsewhere, triage survivors rather than gating on them.
+- **`just mutants` runs the whole workspace and prints every survivor. Its exit code covers
+  `crates/core` and `crates/store` only.** Survivors elsewhere are printed and must be
+  triaged; they do not fail the recipe. That split is deliberate — a gate that a correct
+  tree cannot satisfy carries no information and gets waved through, and the next genuinely
+  new survivor then arrives behind the ones everybody already ignores.
+- **Do not silence a survivor with `--exclude-re` to make the gate pass.** The one exclusion
+  in the recipe is for a mutant that is *equivalent* — provably unkillable — and it argues
+  itself in place. Everything else is merely unkilled, which is a different thing.
+- Runs nightly across the workspace.
 
 For a system whose worst failure is silence, "would we have noticed?" is the question that
 matters, and this is the only tool that answers it.
@@ -244,7 +252,8 @@ Real ones, discovered the hard way. Each has cost somebody time.
 
 1. `just ci` passes — including the per-crate coverage gate.
 2. Tests exist per the table above, and fail without the change.
-3. Changes to `alertthread-core` leave no surviving mutants.
+3. `just mutants` exits `0` — no surviving mutants in `core` or `store`, and any new
+   survivor it prints elsewhere is triaged in the PR.
 4. Docs updated in the correct quadrant.
 5. No new path can result in an alert going unposted.
 6. Public items have doc comments.

@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use alertthread_slack::{Renderer, SlackClient, SlackToken};
+use alertthread_slack::{Disposition, Renderer, SlackClient, SlackToken};
 use alertthread_store::{Backend, StateStore, Store, WorkerId};
 use anyhow::Context as _;
 use tokio::net::TcpListener;
@@ -19,7 +19,7 @@ use crate::http::{AppState, router};
 use crate::metrics::Metrics;
 use crate::ratelimit::SlackLimits;
 use crate::shutdown::{CancelSource, CancelToken, cancellation};
-use crate::worker::{Worker, auth_probe_loop, prune_loop, sample_loop};
+use crate::worker::{Worker, auth_probe_loop, dead_letter_loop, prune_loop, sample_loop};
 
 /// A running relay.
 ///
@@ -33,7 +33,7 @@ pub struct Relay {
     /// configured port was `0`. Tests need it; so does anybody reading a startup log.
     pub addr: std::net::SocketAddr,
     /// Every long-running task: the HTTP server, the outbox worker, the pruner, the
-    /// sampler, the auth prober.
+    /// sampler, the dead-letter reporter, the auth prober.
     tasks: JoinSet<()>,
     /// The other end of the shutdown flag.
     source: CancelSource,
@@ -81,10 +81,12 @@ impl Relay {
 ///
 /// # Errors
 ///
-/// Anything that means the relay cannot deliver an alert: an unreachable store, a migration
-/// that will not apply, a bot token Slack rejects, a port already in use. All of it happens
-/// before the first webhook, which is the point — ADR 001 D11's "fail fast on a bad token"
-/// generalised to everything else that is fatal.
+/// Anything that means the relay can *never* deliver an alert: an unreachable store, a
+/// migration that will not apply, a bot token Slack definitively rejects, a port already in
+/// use. All of it happens before the first webhook, which is the point — ADR 001 D11's "fail
+/// fast on a bad token" generalised to everything else that is fatal.
+///
+/// A Slack it merely cannot *reach* is not in that list; see [`authenticate`].
 pub async fn start(config: Config) -> anyhow::Result<Relay> {
     let metrics = Arc::new(Metrics::new());
 
@@ -102,23 +104,7 @@ pub async fn start(config: Config) -> anyhow::Result<Relay> {
     tracing::info!(%backend, "state store ready");
 
     let slack = Arc::new(build_client(&config)?);
-
-    // ADR 001 D11: call `auth.test` once at startup, log the resolved identity, and fail
-    // fast on a bad token. Failing here rather than at the first alert is the whole value:
-    // a container that will not start is visible, and a relay that starts and cannot post
-    // is not.
-    let identity = slack
-        .auth_test()
-        .await
-        .context("Slack rejected the bot token at startup")?;
-    metrics.slack_auth_valid.set(1);
-    tracing::info!(
-        team = %identity.team,
-        team_id = %identity.team_id,
-        user = %identity.user,
-        bot_id = %identity.bot_id,
-        "authenticated to Slack"
-    );
+    let auth_valid = authenticate(&slack, &metrics, config.slack.auth_startup_grace).await?;
 
     let renderer = Arc::new(build_renderer(&config)?);
     let limits = Arc::new(SlackLimits::new(config.slack.rate_limit_divisor));
@@ -167,15 +153,22 @@ pub async fn start(config: Config) -> anyhow::Result<Relay> {
         shutdown.clone(),
     ));
     tasks.spawn(sample_loop(
-        store,
+        Arc::clone(&store),
         Arc::clone(&metrics),
+        config.worker.sample_interval,
+        shutdown.clone(),
+    ));
+    tasks.spawn(dead_letter_loop(
+        Arc::clone(&store),
         config.worker.sample_interval,
         shutdown.clone(),
     ));
     tasks.spawn(auth_probe_loop(
         slack,
+        store,
         metrics,
         config.slack.auth_probe_interval,
+        auth_valid,
         shutdown,
     ));
 
@@ -186,6 +179,75 @@ pub async fn start(config: Config) -> anyhow::Result<Relay> {
         tasks,
         source,
     })
+}
+
+/// ADR 001 D11's startup `auth.test`, split on ADR 001 D9's error taxonomy.
+///
+/// Returns whether Slack accepted the token. `Err` means the relay must not start.
+///
+/// # Errors
+///
+/// Any failure `SlackError::disposition` classifies as [`Disposition::Terminal`] —
+/// `invalid_auth`, `account_inactive`, `token_revoked`, a malformed token, an unusable
+/// `base_url`. None of those becomes true by waiting.
+async fn authenticate(
+    slack: &SlackClient,
+    metrics: &Metrics,
+    grace: chrono::TimeDelta,
+) -> anyhow::Result<bool> {
+    /// The first retry delay, doubling up to `RETRY_MAX`.
+    const RETRY_BASE: std::time::Duration = std::time::Duration::from_secs(1);
+    /// The longest gap between startup probes, so a long grace still gets several tries.
+    const RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(8);
+
+    let deadline = std::time::Instant::now() + grace.to_std().unwrap_or(std::time::Duration::ZERO);
+    let mut delay = RETRY_BASE;
+
+    let last_error = loop {
+        let error = match slack.auth_test().await {
+            Ok(identity) => {
+                metrics.slack_auth_valid.set(1);
+                tracing::info!(
+                    team = %identity.team,
+                    team_id = %identity.team_id,
+                    user = %identity.user,
+                    bot_id = %identity.bot_id,
+                    "authenticated to Slack"
+                );
+                return Ok(true);
+            }
+            Err(error) => error,
+        };
+
+        if matches!(error.disposition(), Disposition::Terminal) {
+            return Err(anyhow::Error::new(error).context(
+                "Slack rejected the bot token at startup, and it will not become \
+                          valid by being retried",
+            ));
+        }
+
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break error;
+        }
+        tracing::warn!(
+            %error,
+            retry_in_ms = delay.min(remaining).as_millis(),
+            "could not reach Slack to check the bot token; retrying"
+        );
+        tokio::time::sleep(delay.min(remaining)).await;
+        delay = delay.saturating_mul(2).min(RETRY_MAX);
+    };
+
+    metrics.slack_auth_valid.set(0);
+    tracing::error!(
+        error = %last_error,
+        "could not reach Slack to check the bot token within slack.auth_startup_grace; \
+         starting anyway with alertthread_slack_auth_valid=0. Webhooks will be accepted and \
+         queued, and the outbox will deliver them when Slack comes back — refusing to start \
+         through a Slack outage is the one behaviour the outbox exists to make unnecessary"
+    );
+    Ok(false)
 }
 
 /// Builds the Slack client from the validated configuration.
