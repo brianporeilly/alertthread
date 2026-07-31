@@ -32,6 +32,13 @@
 //!
 //! `/healthz` stays process-alive only, exactly per D11 — deliberately no store check, so a
 //! brief database blip does not make Kubernetes restart a pod that is correctly buffering.
+//!
+//! # Only `POST /webhook` can be authenticated
+//!
+//! When `server.auth_token` is set, that one route gains [`crate::auth::require_bearer`].
+//! `/healthz`, `/readyz` and `/metrics` never do: probes and scrapes carry no credentials,
+//! and a `401` on either is a pod that never becomes ready or a relay whose own monitoring
+//! stops. With no token configured the layer is not installed at all.
 
 use std::sync::Arc;
 
@@ -49,6 +56,7 @@ use serde::Deserialize;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
+use crate::auth::{Guard, WebhookToken, require_bearer};
 use crate::config::Config;
 use crate::metrics::Metrics;
 
@@ -68,6 +76,10 @@ pub struct AppState<S: StateStore> {
     /// handler's budget comes from, and so a `Config` cannot be wired up with the timeout
     /// left behind.
     pub request_timeout: std::time::Duration,
+    /// The bearer token `POST /webhook` requires, if one is configured (ADR 001 D11).
+    ///
+    /// `None` is the default and means the route is served without an authentication layer.
+    pub webhook_token: Option<WebhookToken>,
 }
 
 impl<S: StateStore> AppState<S> {
@@ -88,6 +100,7 @@ impl<S: StateStore> AppState<S> {
                 .request_timeout
                 .to_std()
                 .unwrap_or(DEFAULT_REQUEST_TIMEOUT),
+            webhook_token: config.webhook_auth().token().cloned(),
         }
     }
 }
@@ -121,10 +134,24 @@ pub struct WebhookQuery {
 /// [`TraceLayer`] gives every request a span. `alertthread_outbox_oldest_age_seconds` says
 /// alerts are not reaching Slack; the access log is what says whether they are reaching
 /// *us*, and the two questions get asked in that order.
+///
+/// # The authentication layer, when there is one
+///
+/// `server.auth_token` puts [`require_bearer`] on `/webhook` alone, with `route_layer` rather
+/// than `layer` so a `GET /webhook` is still the `405` it was rather than a `401` — the wrong
+/// method is not a secret, and answering both the same way makes a misconfigured receiver
+/// harder to diagnose without making anything safer.
 pub fn router<S: StateStore + 'static>(state: Arc<AppState<S>>) -> Router {
     let timeout = state.request_timeout;
+    let mut webhook_route = post(webhook::<S>);
+    if let Some(token) = state.webhook_token.clone() {
+        webhook_route = webhook_route.route_layer(axum::middleware::from_fn_with_state(
+            Guard::new(token, Arc::clone(&state.metrics)),
+            require_bearer,
+        ));
+    }
     Router::new()
-        .route("/webhook", post(webhook::<S>))
+        .route("/webhook", webhook_route)
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz::<S>))
         .route("/metrics", get(metrics::<S>))

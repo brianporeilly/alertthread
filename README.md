@@ -80,12 +80,15 @@ orphans with no correlation — and the symptom points nowhere near the cause.
 ## ⚠️ The relay cannot alert on itself through itself
 
 If the relay is down, an alert about the relay being down cannot be delivered *by* the
-relay. Any `PrometheusRule` for `alertthread` **must** be paired with an Alertmanager route
-sending `job=alertthread` alerts to a **direct Slack receiver**, bypassing the relay.
+relay. The rules in [`deploy/alertthread.rules.yaml`](deploy/alertthread.rules.yaml) **must**
+be paired with an Alertmanager route sending them to a **direct Slack receiver**, bypassing the
+relay — match on `alertname=~"Alertthread.*"`.
 
-Shipping the rule without that route is worse than shipping no rule, because it creates the
+Shipping the rules without that route is worse than shipping no rules, because it creates the
 appearance of monitoring where there is none. This is the most important operational note in
-the project.
+the project, and
+[Alert on the relay](docs/src/how-to/alert-on-the-relay.md) is the page that walks it —
+including how to prove the bypass works before you need it.
 
 ## Storage
 
@@ -116,7 +119,8 @@ what the container image actually measures and why.
 ```
 just            # list recipes
 just test-fast  # inner loop
-just ci         # everything CI runs, including the coverage gate
+just ci         # the fast half of CI: lint, tests + coverage gate, docs, licences
+just pre-push   # ci + the alert-rule check + the image build + the e2e demo
 just up/down    # compose dev stack (podman or docker)
 ```
 

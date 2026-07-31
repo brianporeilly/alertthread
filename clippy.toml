@@ -30,6 +30,7 @@ doc-valid-idents = [
     "MiniJinja",
     "PostgreSQL",
     "Prometheus",
+    "PromQL",
     "SQLite",
     "Slack",
 ]

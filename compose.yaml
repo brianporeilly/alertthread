@@ -25,6 +25,30 @@
 # Alertmanager) sits behind the `demo` profile and starts only for `just e2e`,
 # so an ordinary `just up` or `just test-pg` is not slowed down by it and does
 # not need a Slack token to come up.
+#
+# ── Hardening ─────────────────────────────────────────────────────────────────
+# The relay runs here the way it is meant to run in production: read-only root
+# filesystem, every capability dropped, no new privileges, and a non-root uid
+# baked into the image (65532, in the Dockerfile). That is not decoration on a
+# dev stack — `just e2e` drives this compose file, so it is the only automated
+# place those flags are proven not to break the relay at runtime.
+#
+# Writable paths are declared, never bought by relaxing read_only:
+#   /data  the SQLite database, its -wal and its -shm
+#   /tmp   where SQLite would put a spill file if a query ever needed one
+#
+# `seccomp` is not set here because both podman and docker apply their default
+# profile already; the flag would only ever be used to switch it *off*.
+# Kubernetes is the opposite — it defaults to Unconfined and needs
+# `seccompProfile: RuntimeDefault` spelled out. See
+# docs/src/how-to/harden-a-deployment.md, which carries the manifest.
+#
+# The other services get what fits them and no more. Prometheus and Alertmanager
+# drop capabilities but keep a writable root filesystem (the note on the
+# alertmanager service says why), and PostgreSQL is left alone entirely: its
+# entrypoint runs as root to chown the data directory and drops privileges with
+# su-exec, so `cap_drop: [ALL]` stops it initialising. None of the three is
+# something this project ships.
 
 name: alertthread
 
@@ -87,6 +111,13 @@ services:
       timeout: 3s
       retries: 15
       start_period: 3s
+    # It keeps its messages in memory and writes nothing, so read-only costs it
+    # nothing. Hardened alongside the relay because it is the other image this
+    # repository builds.
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
 
   # ── demo profile ────────────────────────────────────────────────────────────
   # The relay under test, built from the release Dockerfile. Configured entirely
@@ -106,6 +137,10 @@ services:
       ALERTTHREAD_STORAGE__BACKEND: "sqlite"
       ALERTTHREAD_STORAGE__URL: "sqlite:///data/state.sqlite"
       ALERTTHREAD_COLLAPSE__THRESHOLD: "3"
+      # The webhook perimeter, on, so `just e2e` exercises it. Alertmanager sends
+      # this in `http_config.authorization` — see dev/alertmanager/alertmanager.yml.
+      # A demo credential in a demo stack; nothing here is a secret.
+      ALERTTHREAD_SERVER__AUTH_TOKEN: "demo-webhook-token-not-a-secret"
       RUST_LOG: "info,alertthread=debug"
     ports:
       - "8080:8080"
@@ -113,8 +148,19 @@ services:
     # nonroot uid 65532, and a tmpfs mounts world-writable (mode 1777) so that
     # uid can create the database. A named volume would come up root-owned and
     # the relay could not write it. The data is throwaway, which a tmpfs suits.
+    #
+    # /tmp is the second declared write: nothing puts a file there today, but
+    # SQLite spills a temp file for a large sort or an index rebuild, and the
+    # place to find that out is here rather than in somebody's cluster.
     tmpfs:
       - /data
+      - /tmp
+    # Everything the hardening how-to tells an operator to set, set here, so the
+    # end-to-end job is what proves the relay runs under it.
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       slack-mock:
         condition: service_healthy
@@ -132,6 +178,11 @@ services:
       # :z relabels for SELinux — mandatory on Fedora, harmless elsewhere.
       - ./dev/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:z
       - ./dev/prometheus/rules.yml:/etc/prometheus/rules.yml:z
+    # Capabilities and privilege escalation, but not read_only — see the note on
+    # the alertmanager service below.
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       alertmanager:
         condition: service_started
@@ -148,6 +199,17 @@ services:
       - "9093:9093"
     volumes:
       - ./dev/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:z
+    # No read_only on this one or on Prometheus, and the reason is worth writing
+    # down because it was tried: both write to a data directory inside their own
+    # WORKDIR, and a tmpfs over that path comes up with the *image* directory's
+    # ownership (podman mounts it `tmpcopyup`) while both processes run as
+    # `nobody`. Alertmanager fails with `Unable to create data directory` and the
+    # demo never starts. Making it work means a pre-chowned volume, which buys
+    # nothing here: these are third-party dev dependencies, not what this project
+    # ships. The relay above is the artefact whose hardening this file proves.
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       relay:
         condition: service_started

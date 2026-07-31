@@ -31,6 +31,12 @@ COMPOSE="${COMPOSE:-docker compose}"
 MOCK="${MOCK_URL:-http://localhost:8081}"
 RELAY="${RELAY_URL:-http://localhost:8080}"
 
+# The bearer token the demo stack configures. Must match
+# ALERTTHREAD_SERVER__AUTH_TOKEN in compose.yaml and the credentials in
+# dev/alertmanager/alertmanager.yml. Not a secret; it guards a container that
+# lives for ninety seconds.
+WEBHOOK_TOKEN="${WEBHOOK_TOKEN:-demo-webhook-token-not-a-secret}"
+
 # How long each phase may take before we give up. The resolve fires at Prometheus
 # uptime 60s, so its budget is the largest.
 READY_TIMEOUT="${READY_TIMEOUT:-90}"
@@ -114,6 +120,55 @@ until curl -fsS "${RELAY}/healthz" >/dev/null 2>&1; do
     sleep 2
 done
 echo "    relay: healthy"
+
+# The perimeter, before anything else touches the relay. This is the only place
+# the bearer token is exercised against the shipped container rather than against
+# the router in a test binary — and the only place the *routing* of it is proven:
+# the three endpoints Kubernetes and Prometheus use must stay open, or the pod
+# never becomes ready and its own metrics stop being scrapable.
+say "Checking the webhook perimeter (ADR 001 D11)"
+status_of() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+
+# An empty-alerts body: accepted, writes nothing, posts nothing, so it cannot
+# disturb the assertions below. What is under test is the credential, not ingest.
+EMPTY_BODY='{"version":"4","groupKey":"probe","truncatedAlerts":0,"status":"firing","receiver":"alertthread","groupLabels":{},"commonLabels":{},"commonAnnotations":{},"externalURL":"http://alertmanager","alerts":[]}'
+
+code="$(status_of -X POST -H 'content-type: application/json' -d "$EMPTY_BODY" "${RELAY}/webhook")"
+if [[ "$code" != "401" ]]; then
+    echo "an unauthenticated POST /webhook returned ${code}, expected 401" >&2
+    dump
+    exit 1
+fi
+echo "    unauthenticated POST /webhook: 401"
+
+code="$(status_of -X POST -H 'content-type: application/json' \
+    -H "authorization: Bearer wrong-${WEBHOOK_TOKEN}" -d "$EMPTY_BODY" "${RELAY}/webhook")"
+if [[ "$code" != "401" ]]; then
+    echo "POST /webhook with the wrong credential returned ${code}, expected 401" >&2
+    dump
+    exit 1
+fi
+echo "    wrong credential: 401"
+
+code="$(status_of -X POST -H 'content-type: application/json' \
+    -H "authorization: Bearer ${WEBHOOK_TOKEN}" -d "$EMPTY_BODY" "${RELAY}/webhook")"
+if [[ "$code" != "200" ]]; then
+    echo "POST /webhook with the configured credential returned ${code}, expected 200" >&2
+    dump
+    exit 1
+fi
+echo "    configured credential: 200"
+
+for open_path in healthz readyz metrics; do
+    code="$(status_of "${RELAY}/${open_path}")"
+    if [[ "$code" != "200" ]]; then
+        echo "GET /${open_path} returned ${code} with no credential, expected 200 — probes and" >&2
+        echo "scrapes do not carry one, and a 401 here is a pod that never becomes ready" >&2
+        dump
+        exit 1
+    fi
+done
+echo "    /healthz, /readyz, /metrics: 200 without a credential"
 
 # The channel #alerts (canonical id aside) must contain exactly one top-level
 # message — the group summary — with the individual alerts threaded under it.

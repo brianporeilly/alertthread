@@ -19,12 +19,14 @@
 //! earlier); a missing config file is not an error, because the environment alone is a
 //! perfectly good way to configure a container.
 //!
-//! # The token never reaches a log line
+//! # No secret reaches a log line
 //!
-//! [`SlackConfig::token`] is a [`SlackToken`], whose `Debug` prints `<redacted>`. That is
-//! why the newtype lives in `alertthread-slack` rather than being a `String` here: the
-//! property is inherited by every struct that embeds one, instead of being something each
-//! new struct has to remember. `debug_never_shows_the_bot_token` is the test that says so.
+//! [`SlackConfig::token`] is a [`SlackToken`] and [`ServerConfig::auth_token`] is a
+//! [`WebhookToken`], and the `Debug` of each prints `<redacted>`. That is why they are
+//! newtypes rather than `String`s: the property is inherited by every struct that embeds one,
+//! instead of being something each new struct has to remember.
+//! `debug_never_shows_the_bot_token` and `debug_never_shows_the_webhook_token` are the tests
+//! that say so.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -37,6 +39,8 @@ use chrono::TimeDelta;
 use figment::providers::{Env, Format, Serialized, Yaml};
 use figment::{Figment, Profile};
 use serde::{Deserialize, Deserializer, Serialize};
+
+use crate::auth::{WebhookAuth, WebhookToken};
 
 /// The environment-variable prefix for everything below.
 ///
@@ -91,6 +95,20 @@ pub struct ServerConfig {
     /// spends undelivered for no reason.
     #[serde(with = "duration")]
     pub shutdown_grace: TimeDelta,
+    /// The bearer token `POST /webhook` requires (ADR 001 D11, "Security").
+    ///
+    /// Unset by default, which leaves the webhook unauthenticated. Redacted in `Debug` by
+    /// [`WebhookToken`], and skipped when this struct is serialised for exactly the reason
+    /// [`no_secret`] gives.
+    ///
+    /// `/healthz`, `/readyz` and `/metrics` are never affected by it — see [`crate::auth`].
+    #[serde(default, serialize_with = "no_secret")]
+    pub auth_token: Option<WebhookToken>,
+    /// A file to read [`Self::auth_token`] from, if it is mounted rather than passed in.
+    ///
+    /// The usual Kubernetes shape, and the same trailing-newline handling as
+    /// [`SlackConfig::token_file`].
+    pub auth_token_file: Option<PathBuf>,
 }
 
 impl Default for ServerConfig {
@@ -99,6 +117,8 @@ impl Default for ServerConfig {
             listen: SocketAddr::from(([0, 0, 0, 0], 8080)),
             request_timeout: TimeDelta::seconds(15),
             shutdown_grace: TimeDelta::seconds(20),
+            auth_token: None,
+            auth_token_file: None,
         }
     }
 }
@@ -173,7 +193,7 @@ pub struct SlackConfig {
     #[serde(
         default,
         deserialize_with = "token",
-        serialize_with = "no_token",
+        serialize_with = "no_secret",
         alias = "bot_token"
     )]
     pub token: Option<SlackToken>,
@@ -374,6 +394,20 @@ pub enum ConfigError {
     )]
     NoDefaultChannel,
 
+    /// `server.auth_token_file` was set and could not be read.
+    ///
+    /// Fatal rather than degrading to an unauthenticated webhook: the operator asked for a
+    /// perimeter, and a relay that quietly served without one would be a security setting
+    /// nobody could tell was missing.
+    #[error("server.auth_token_file {path} could not be read: {source}")]
+    UnreadableWebhookToken {
+        /// The path that was configured.
+        path: PathBuf,
+        /// What the filesystem said.
+        #[source]
+        source: std::io::Error,
+    },
+
     /// A template override directory was configured and could not be read.
     #[error("templates.dir {path} could not be read: {source}")]
     UnreadableTemplates {
@@ -435,6 +469,7 @@ impl Config {
     pub fn from_figment(figment: &Figment) -> Result<Self, ConfigError> {
         let mut config: Self = figment.extract()?;
         config.resolve_token()?;
+        config.resolve_webhook_token()?;
         config.validate()?;
         Ok(config)
     }
@@ -451,6 +486,18 @@ impl Config {
         // `kubectl create secret --from-file` keeps the trailing newline, and the error a
         // newline produces further downstream names HTTP headers rather than tokens.
         self.slack.token = Some(SlackToken::new(raw.trim()));
+        Ok(())
+    }
+
+    /// Folds `server.auth_token_file` into `server.auth_token`.
+    fn resolve_webhook_token(&mut self) -> Result<(), ConfigError> {
+        let Some(path) = self.server.auth_token_file.clone() else {
+            return Ok(());
+        };
+        // The file wins over an inline value, for the same reason it does for the bot token.
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|source| ConfigError::UnreadableWebhookToken { path, source })?;
+        self.server.auth_token = Some(WebhookToken::new(raw.trim()));
         Ok(())
     }
 
@@ -513,6 +560,21 @@ impl Config {
         self.slack.token.clone()
     }
 
+    /// What `server.auth_token` resolves to (ADR 001 D11's optional bearer token).
+    ///
+    /// A configured-but-blank value is [`WebhookAuth::Blank`] rather than an error: refusing
+    /// to start would be silence caused by an *optional* security setting, and treating it as
+    /// `Open` without saying so would leave an operator believing the webhook is closed. It is
+    /// reported at startup instead.
+    #[must_use]
+    pub fn webhook_auth(&self) -> WebhookAuth {
+        match self.server.auth_token.as_ref() {
+            None => WebhookAuth::Open,
+            Some(token) if token.is_blank() => WebhookAuth::Blank,
+            Some(token) => WebhookAuth::Required(token.clone()),
+        }
+    }
+
     /// Reads the template overrides from `templates.dir`.
     ///
     /// A file whose name is not one of the four templates is skipped and reported, not
@@ -564,19 +626,19 @@ fn token<'de, D: Deserializer<'de>>(de: D) -> Result<Option<SlackToken>, D::Erro
     Ok(Option::<String>::deserialize(de)?.map(SlackToken::new))
 }
 
-/// Serialises the token as absent, always.
+/// Serialises a secret as absent, always.
 ///
-/// `Serialize` exists on [`SlackConfig`] so `figment` can use the `Default` as its defaults
-/// layer. Writing the token into that layer would put it inside a `Figment`, whose error
-/// messages quote the values they came from — which is a token in a startup log, which is a
-/// burned token.
+/// `Serialize` exists on [`SlackConfig`] and [`ServerConfig`] so `figment` can use the
+/// `Default` as its defaults layer. Writing a secret into that layer would put it inside a
+/// `Figment`, whose error messages quote the values they came from — which is a token in a
+/// startup log, which is a burned token.
 #[expect(
     clippy::ref_option,
     reason = "the signature is dictated by serde's serialize_with, which always hands the \
               field by reference"
 )]
-fn no_token<S: serde::Serializer>(
-    _token: &Option<SlackToken>,
+fn no_secret<T, S: serde::Serializer>(
+    _secret: &Option<T>,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     serializer.serialize_none()
@@ -1010,6 +1072,106 @@ slack:
         .expect_err("a configured token file has to exist");
         assert!(
             matches!(error, ConfigError::UnreadableToken { .. }),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("/nonexistent/"), "{error}");
+    }
+
+    #[test]
+    fn the_webhook_is_unauthenticated_unless_a_token_is_configured() {
+        // ADR 001 D11 calls the bearer token optional, and off is the default: a relay that
+        // suddenly required a credential on upgrade would 401 every delivery from an
+        // Alertmanager nobody had reconfigured yet.
+        assert!(minimal().webhook_auth().is_open());
+        assert!(minimal().webhook_auth().token().is_none());
+    }
+
+    #[test]
+    fn a_configured_token_closes_the_webhook() {
+        let config = load(&format!(
+            "{MINIMAL}\nserver:\n  auth_token: \"s3cret-webhook-token\"\n"
+        ))
+        .expect("configuration loads");
+        let auth = config.webhook_auth();
+        assert!(!auth.is_open());
+        assert!(
+            auth.token()
+                .expect("a token was configured")
+                .matches("s3cret-webhook-token")
+        );
+    }
+
+    #[test]
+    fn a_blank_webhook_token_leaves_the_webhook_open_rather_than_refusing_to_start() {
+        // A chart that renders an unset value produces `""`. Refusing to start over an
+        // optional security setting would be silence; the startup log says which mode is in
+        // effect, which is what stops it being quiet — see `run::start`.
+        for blank in ["\"\"", "\"   \""] {
+            let config = load(&format!("{MINIMAL}\nserver:\n  auth_token: {blank}\n"))
+                .expect("a blank token is not fatal");
+            assert!(
+                matches!(config.webhook_auth(), crate::auth::WebhookAuth::Blank),
+                "{blank}"
+            );
+            assert!(config.webhook_auth().is_open());
+        }
+    }
+
+    #[test]
+    fn debug_never_shows_the_webhook_token() {
+        // The `Config` is logged at startup in full. Same property as the bot token, and it
+        // has to hold for the same reason.
+        let config = load(&format!(
+            "{MINIMAL}\nserver:\n  auth_token: \"s3cret-webhook-token\"\n"
+        ))
+        .expect("configuration loads");
+
+        let rendered = format!("{config:?}");
+        assert!(!rendered.contains("s3cret"), "{rendered}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+
+        // And it is not written into the defaults layer figment quotes in its errors.
+        let serialised =
+            serde_json::to_string(&config).expect("configuration serialises for figment");
+        assert!(!serialised.contains("s3cret"), "{serialised}");
+    }
+
+    #[test]
+    fn a_webhook_token_file_is_read_and_its_trailing_newline_removed() {
+        // `kubectl create secret --from-file` keeps the newline, and a token with a newline
+        // in it never matches the header Alertmanager sends.
+        let dir = std::env::temp_dir().join(format!("alertthread-wh-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("webhook-token");
+        std::fs::write(&path, "from-a-file\n").expect("writing the token");
+
+        let config = load(&format!(
+            "{MINIMAL}\nserver:\n  auth_token: \"overridden\"\n  auth_token_file: {}\n",
+            path.display()
+        ))
+        .expect("configuration loads");
+
+        let auth = config.webhook_auth();
+        let token = auth.token().expect("the file is a token");
+        assert!(token.matches("from-a-file"), "the newline has to go");
+        assert!(
+            !token.matches("overridden"),
+            "the mount is the more specific answer and wins"
+        );
+        std::fs::remove_dir_all(&dir).expect("cleaning up");
+    }
+
+    #[test]
+    fn a_webhook_token_file_that_is_not_there_names_the_path() {
+        // Fatal, unlike a blank inline value: the operator named a mount that is not there,
+        // and serving an unauthenticated webhook because a secret failed to mount is the one
+        // outcome they would never find out about.
+        let error = load(&format!(
+            "{MINIMAL}\nserver:\n  auth_token_file: /nonexistent/alertthread/webhook-token\n"
+        ))
+        .expect_err("a configured token file has to exist");
+        assert!(
+            matches!(error, ConfigError::UnreadableWebhookToken { .. }),
             "{error:?}"
         );
         assert!(error.to_string().contains("/nonexistent/"), "{error}");

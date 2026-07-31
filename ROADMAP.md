@@ -11,7 +11,7 @@ the tree in a state where the next phase is the only thing that makes it work.
 
 ## Current status
 
-*Last updated 2026-07-28. Keep this current — it is the first thing anyone picking the
+*Last updated 2026-07-29. Keep this current — it is the first thing anyone picking the
 project up will read, and git log does not distinguish "in review" from "abandoned".*
 
 | Phase | State |
@@ -23,8 +23,9 @@ project up will read, and git log does not distinguish "in review" from "abandon
 | ↳ group labels | ✅ built — `group_message.group_labels`, both backends |
 | 4 — Wiring, PR A | ✅ merged (#12) — the walking skeleton |
 | 4 — Wiring, PR B | ✅ merged (#13) — mock UI, compose demo, tutorial; the exit criterion is an asserted CI job |
-| **5 — Hardening, PR A** | 🟡 **in review — resilience: crash recovery, storm-under-load, dead letters, startup auth** |
-| 5 — Hardening, PR B | ⬜ not started — webhook auth, container hardening, `PrometheusRule`, troubleshooting docs |
+| 5 — Hardening, PR A | ✅ merged (#15) — resilience: crash recovery, storm-under-load, dead letters, startup auth |
+| **5 — Hardening, PR B** | 🟡 **in review — webhook bearer auth, container hardening, alert rules, the two Diátaxis pages, `just pre-push`** |
+| 5 — closeout | ⬜ not started — ADR 003 batching the known open items below |
 | 6 — Release | ⬜ not started |
 
 ADRs [001](docs/src/adr/001-adr.md) and [002](docs/src/adr/002-implementation-gaps.md) are
@@ -59,7 +60,7 @@ sessions that produced it.
 | Architecture | Functional core / imperative shell, in a 4-crate workspace |
 | Docs | Diátaxis, rendered by mdBook, written per-phase not at the end |
 | Test env | compose stack on podman *or* docker + `#[sqlx::test]`; no testcontainers |
-| Task runner | `just` — **CI invokes the same recipes developers do** |
+| Task runner | `just` — **every CI job invokes one of these recipes**; `just pre-push` is the full local set, `just ci` the fast subset |
 | Coverage | Enforced per-crate, gating `just test` and `just ci` — see below |
 | Licence | Dual `MIT OR Apache-2.0` |
 
@@ -187,10 +188,17 @@ alertthread/
 │   ├── store/                  # alertthread-store  — StateStore + backends
 │   ├── slack/                  # alertthread-slack  — client + rendering
 │   └── app/                    # alertthread        — the binary
+├── deploy/                     # raw manifests, for Phase 6 to package
+│   └── alertthread.rules.yaml  # Prometheus alert rules (ADR 001 D11)
 ├── dev/
 │   └── slack-mock/             # dev-only fake Slack with a web UI
 └── docs/                       # mdBook, Diátaxis
 ```
+
+`deploy/` holds artefacts an operator consumes directly and Phase 6 will wrap in the Helm
+chart. It is deliberately *not* a chart yet: a rules file that `promtool` can check and a chart
+can embed verbatim is useful now, and inventing half a chart to hold it would be Phase 6 work
+done badly.
 
 **Dependency direction, enforced by Cargo rather than by review:**
 
@@ -358,14 +366,16 @@ survives a crash, a storm or a Slack outage. PR B is the security and packaging 
 
 - Optional bearer-token auth on the webhook endpoint
 - Container hardening: non-root, read-only rootfs, dropped caps, seccomp
-- `PrometheusRule` **plus** the circular-dependency documentation (ADR D11) — the rule is
+- Alert rules **plus** the circular-dependency documentation (ADR D11) — the rules are
   actively harmful shipped without it
 - Troubleshooting docs: `send_resolved`, `max_alerts` (ADR D8)
 - The `just ci` / e2e recipe gap (known open item 11)
 
 **Exit:** kill -9 during any phase of delivery never produces silence.
 
-**Docs:** `how-to/troubleshoot.md`, `explanation/failure-semantics.md` — both PR B.
+**Docs:** `how-to/troubleshoot.md`, `explanation/failure-semantics.md` — both PR B, plus
+`how-to/harden-a-deployment.md` and `how-to/alert-on-the-relay.md`, which are where the D11
+security and circular-dependency notes ended up living.
 
 ---
 
@@ -451,10 +461,14 @@ a `/still-firing` slash command.
     stubbed assertion in `Policy::validate`'s tests made it exit `1` naming the two core
     survivors, and the app crate's existing `shutdown.rs` timeouts made it print three
     survivors and exit `0`.
-11. **`just ci` runs neither the image job nor `just e2e`.** AGENTS.md says "CI runs these
-    same recipes", which is not quite true for those two — both are CI-only. That gap let a
-    real break reach CI once already (#12's image smoke test). Either fold them into a
-    pre-push recipe or reword the claim.
+11. ~~**`just ci` runs neither the image job nor `just e2e`.**~~ **Resolved in Phase 5 PR B:
+    both, as decided in review.** `just pre-push` is `check-engine`, `check-rules`, `ci`,
+    `image` and `e2e`, in that order so the cheapest failure comes first; AGENTS.md now says
+    "every CI job invokes one of these recipes" and states plainly that `just ci` is not all of
+    CI. `check-engine` runs first so a missing container engine fails legibly rather than
+    silently skipping the container jobs.
+
+    Two CI jobs are still not reachable from one local recipe, which is item 15.
 12. ~~**Fail-fast startup auth conflicts with what the outbox promises.**~~ **Resolved in
     Phase 5 PR A: split on the D9 error taxonomy.** `SlackError::disposition` already answers
     "will this ever succeed?", and startup now asks it rather than asking "did `auth.test`
@@ -486,6 +500,63 @@ a `/still-firing` slash command.
     `/admin` endpoint behind PR B's bearer token, or a binary subcommand — decided
     deliberately rather than bolted on.
 
+    PR B shipped the bearer token that such an endpoint would sit behind, so the blocker is now
+    only the decision, not the perimeter.
+
+15. **`just pre-push` still does not cover the `test-pg` or MSRV jobs.** Item 11 is resolved for
+    the two recipes it named; these two are what is left, and both are deliberate rather than
+    forgotten.
+
+    `just test-pg` needs the compose stack up. Folding `just up` into `pre-push` would mean
+    `just down --volumes` around it, which destroys whatever a developer had running — a recipe
+    that eats your dev database to check a gate is a recipe people stop running. The MSRV job
+    needs the 1.94 toolchain installed and `RUSTUP_TOOLCHAIN` overriding `rust-toolchain.toml`;
+    a recipe cannot install a toolchain without being the kind of thing nobody wants a task
+    runner doing.
+
+    Both are named in AGENTS.md and in `pre-push`'s own closing output, so the gap is stated
+    rather than implied. The honest fix is either a `pre-push-full` that manages the stack
+    explicitly, or accepting that two jobs are CI's alone.
+
+16. **A `401` on the webhook loses the alerts in that delivery, and that is a deliberate
+    exception to "silence is never a valid outcome".** Alertmanager retries `5xx` and `429`, not
+    `4xx`, so a refused delivery is never re-sent.
+
+    The alternative — accepting a delivery that failed authentication — is not a trade this
+    project gets to make for a user who asked for a perimeter. What it does instead is refuse to
+    be quiet about it: ERROR on every refusal, two `outcome` label values separating "no
+    credential" from "wrong credential", and `AlertthreadWebhookUnauthenticated` in the shipped
+    rules. The token is also off by default, so the failure mode requires somebody to have
+    turned it on.
+
+    Worth stating in ADR 003 next to D9's table, because D9's "every degradation path terminates
+    in post a plain message" now has two documented exceptions and the other one (`400` on an
+    unparseable body) was already recorded only in passing.
+
+17. **`alertthread_webhook_requests_total{outcome="auth_missing"|"auth_mismatch"}` are not in
+    D11's metric list.** Same class as items 7 and 9: D11 specified the bearer token under
+    "Security" and the metrics under "Observability", and did not connect the two. Splitting the
+    two values is the same argument as `source` on `alertthread_rate_limited_total` — the
+    operator's next action differs — with the extra wrinkle that the split is *deliberately
+    invisible from outside*, since every refusal is an identical `401`.
+
+18. **Nothing enforces the container hardening, and the alert thresholds are guesses.** Two
+    findings from PR B that both land in Phase 6's lap.
+
+    `compose.yaml` runs the relay read-only with all capabilities dropped and `just e2e` proves
+    it, but the Kubernetes half — `readOnlyRootFilesystem`, `seccompProfile: RuntimeDefault`,
+    `fsGroup` on the SQLite PVC — exists only as a documented fragment in
+    `how-to/harden-a-deployment.md`. The chart is where it becomes real, and where something can
+    check it. Note also that Prometheus and Alertmanager in the dev stack are *not* read-only:
+    both write to a data directory inside their own WORKDIR, and a tmpfs over it comes up with
+    the image directory's ownership while both run as `nobody`. Tried, reverted, commented in
+    place.
+
+    And every threshold in `deploy/alertthread.rules.yaml` is a starting point rather than a
+    measurement — `alertthread_outbox_oldest_age_seconds > 300` most of all. Same status as
+    item 1's `collapse_threshold`: revisit against real volume, and say so in the file, which it
+    does.
+
 ## Process notes worth keeping
 
 - **A gate nobody has watched reject something is not a gate.** Phase 0 proved the coverage
@@ -508,6 +579,15 @@ a `/still-firing` slash command.
   and people learn to wave it through, so the next genuinely new survivor arrives behind the
   one everybody already ignores. Exclude the equivalent mutant by name, argue it in place,
   and keep the exit code meaningful.
+- **The rule check was given the treatment before it landed.** `deploy/alertthread.rules.yaml`
+  is validated two ways, and both were watched rejecting something rather than merely passing:
+  renaming `alertthread_outbox_oldest_age_seconds` in the file failed
+  `every_metric_the_rules_name_is_one_this_build_exports` naming the metric; changing
+  `outcome="rejected"` to a value nothing emits failed the label test; replacing a
+  `sum by (job, instance)` with a bare `sum()` failed the routing test; and truncating a `{` was
+  caught by `promtool` through `just check-rules`. The failure this guards against is specific
+  and invisible: a rule naming a metric that does not exist evaluates empty for ever and looks
+  exactly like a healthy relay.
 - **Mutation testing has earned its place.** It found a real bug in Phase 3 that coverage
   could not see: `AlertView::from_webhook` decided "resolved?" by comparing `endsAt` against
   `startsAt`, so a resolution landing in the same second it fired rendered as still firing.

@@ -141,6 +141,19 @@ jobs:
           tool: mdbook
       - run: just docs
 
+  rules:
+    name: prometheus alert rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: extractions/setup-just@v3
+      # `promtool check rules` on deploy/alertthread.rules.yaml, from the pinned
+      # Prometheus image. The rules are a shipped artefact and nothing else in the
+      # repo compiles PromQL, so without this a syntax error reaches a cluster.
+      # The other half — that every metric the rules name is one the binary
+      # exports — is a unit test and runs in the `test` job.
+      - run: just check-rules
+
   image:
     name: scratch image builds and runs
     runs-on: ubuntu-latest
@@ -172,7 +185,7 @@ jobs:
   ci-success:
     name: CI
     if: always()
-    needs: [lint, test, test-pg, deny, msrv, docs, image, e2e]
+    needs: [lint, test, test-pg, deny, msrv, docs, rules, image, e2e]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any job failed

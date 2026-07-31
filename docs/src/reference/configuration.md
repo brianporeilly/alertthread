@@ -16,10 +16,10 @@ Configuration is loaded by `figment`, in three layers. Later layers win:
 **A new config option is not merged until it appears on this page.** That rule is in
 AGENTS.md, and this page is the reason it exists.
 
-⚠️ The bot token is read from an environment variable or a file and is **never logged**.
-It is held in a `SlackToken` newtype whose `Debug` prints `<redacted>`, so it stays
-redacted inside every struct that embeds one — including the whole `Config`, which *is*
-logged at startup.
+⚠️ The two secrets on this page — the Slack bot token and the webhook bearer token — are read
+from an environment variable or a file and are **never logged**. Each is held in a newtype
+whose `Debug` prints `<redacted>`, so it stays redacted inside every struct that embeds one —
+including the whole `Config`, which *is* logged at startup.
 
 ## Refusing to start
 
@@ -34,6 +34,7 @@ already told Alertmanager it would take the alert; refusing then would be too la
 | `resolve.update_in_place` and `resolve.thread_reply` both `false` | [ADR 001 D6](../adr/001-adr.md): a resolve that does nothing is indistinguishable from the bug this relay exists to fix |
 | `storage.backend` is not a backend this build has | Named at boot rather than as a connection error against a URL scheme with no driver behind it |
 | An unrecognised key anywhere in the file | A misspelled key is a setting an operator believes is in effect |
+| `server.auth_token_file` is set and cannot be read | The operator asked for a perimeter; serving without one because a secret failed to mount is the one outcome they would never find out about |
 
 Everything else **degrades rather than refusing**. A template override that will not compile
 is dropped and the built-in kept; a file in `templates.dir` that is not one of the four
@@ -188,6 +189,7 @@ server:
   listen: "0.0.0.0:8080"
   request_timeout: 15s
   shutdown_grace: 20s
+  auth_token: ~                # or server.auth_token_file; unset means no auth
 ```
 
 ### `server.listen`
@@ -226,6 +228,72 @@ How long to let in-flight work finish after `SIGTERM` or `SIGINT`. A clean shutd
 the batch the worker is holding rather than relying on its leases expiring — an abandoned
 lease is not a bug, but waiting the full lease duration is time an alert spends undelivered
 for no reason.
+
+### `server.auth_token`
+
+| | |
+|---|---|
+| Environment variable | `ALERTTHREAD_SERVER__AUTH_TOKEN` |
+| Type | string |
+| Default | unset — **the webhook is unauthenticated** |
+
+A bearer token that `POST /webhook` requires ([ADR 001 D11](../adr/001-adr.md)). When it is
+set, a delivery must carry `Authorization: Bearer <token>` or it is answered `401`. Never
+logged: see the warning at the top of this page.
+
+Off by default, deliberately. The endpoint is cluster-internal in every deployment shape this
+project targets, and a relay that started requiring a credential on upgrade would `401` every
+delivery from an Alertmanager nobody had reconfigured yet — silence introduced by a security
+feature.
+
+**Covers `POST /webhook` and nothing else.** `/healthz`, `/readyz` and `/metrics` are never
+authenticated: probes and scrapes carry no credentials, and a `401` on either of the first two
+is a pod that never becomes ready, while a `401` on `/metrics` breaks the relay's own alerting.
+
+| Behaviour | Detail |
+|---|---|
+| Comparison | Constant-time. A `401` reveals nothing about how close the credential was |
+| Refusal | `401`, a bare `WWW-Authenticate: Bearer`, and the body `unauthorized` — identical for every kind of failure |
+| Counted as | `alertthread_webhook_requests_total{outcome="auth_missing"}` or `{outcome="auth_mismatch"}` |
+| Logged as | ERROR. Alertmanager does not retry a `401`, so a refused delivery is lost |
+| Read | Once, at startup. A rotated secret needs a restart |
+| Scheme | Case-insensitive, per RFC 7235. `bearer` and `Bearer` both work |
+
+An empty value — which is what a chart renders for a secret that did not resolve — is treated as
+**unset**, and warned about at startup:
+
+```
+WARN server.auth_token is set to an empty value, so POST /webhook is unauthenticated.
+```
+
+Refusing to start over an empty *optional* setting would be an outage caused by a security
+feature, and treating it as configured would mean matching every credential against `""`. The
+warning is the third option, and it is the only signal that distinguishes this from the default.
+
+The Alertmanager side, and the full setup, is in
+[Harden a deployment](../how-to/harden-a-deployment.md).
+
+### `server.auth_token_file`
+
+| | |
+|---|---|
+| Environment variable | `ALERTTHREAD_SERVER__AUTH_TOKEN_FILE` |
+| Type | path |
+| Default | unset |
+
+Read `server.auth_token` from a file instead — the mounted-secret shape. It wins over an inline
+value if both are set, for the same reason `slack.token_file` does.
+
+Trailing whitespace is trimmed, because `kubectl create secret --from-file` keeps the newline.
+The inline value is **not** trimmed.
+
+A configured path that cannot be read is **fatal**, unlike a blank inline value. The operator
+named a mount, and a relay that served an unauthenticated webhook because the mount failed
+would be a perimeter nobody could tell was missing.
+
+⚠️ Alertmanager does not trim what *it* reads from `credentials_file`. A secret written with a
+trailing newline sends a credential with a trailing newline, and the relay answers `401` — the
+single most common cause of `auth_mismatch`.
 
 ---
 
