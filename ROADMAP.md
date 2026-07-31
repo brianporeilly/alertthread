@@ -11,7 +11,7 @@ the tree in a state where the next phase is the only thing that makes it work.
 
 ## Current status
 
-*Last updated 2026-07-29. Keep this current — it is the first thing anyone picking the
+*Last updated 2026-07-30. Keep this current — it is the first thing anyone picking the
 project up will read, and git log does not distinguish "in review" from "abandoned".*
 
 | Phase | State |
@@ -24,12 +24,12 @@ project up will read, and git log does not distinguish "in review" from "abandon
 | 4 — Wiring, PR A | ✅ merged (#12) — the walking skeleton |
 | 4 — Wiring, PR B | ✅ merged (#13) — mock UI, compose demo, tutorial; the exit criterion is an asserted CI job |
 | 5 — Hardening, PR A | ✅ merged (#15) — resilience: crash recovery, storm-under-load, dead letters, startup auth |
-| **5 — Hardening, PR B** | 🟡 **in review — webhook bearer auth, container hardening, alert rules, the two Diátaxis pages, `just pre-push`** |
-| 5 — closeout | ⬜ not started — ADR 003 batching the known open items below |
-| 6 — Release | ⬜ not started |
+| 5 — Hardening, PR B | ✅ merged (#16) — webhook bearer auth, container hardening, alert rules, the two Diátaxis pages, `just pre-push` |
+| **5 — closeout** | 🟡 **in review — ADR 003 batching the divergences below** |
+| **6 — Release** | ⬜ **next** |
 
-ADRs [001](docs/src/adr/001-adr.md) and [002](docs/src/adr/002-implementation-gaps.md) are
-merged and accepted.
+ADRs [001](docs/src/adr/001-adr.md), [002](docs/src/adr/002-implementation-gaps.md) and
+[003](docs/src/adr/003-hardening-divergences.md) are merged and accepted.
 
 ### Built: group labels on `group_message`
 
@@ -377,6 +377,11 @@ survives a crash, a storm or a Slack outage. PR B is the security and packaging 
 `how-to/harden-a-deployment.md` and `how-to/alert-on-the-relay.md`, which are where the D11
 security and circular-dependency notes ended up living.
 
+### Closeout
+
+[ADR 003](docs/src/adr/003-hardening-divergences.md) — the divergences from ADR 001 that
+Phases 3–5 produced, batched the way ADR 002 batched Phases 1–2. ADR 001 is not rewritten.
+
 ---
 
 ## Phase 6 — Release
@@ -388,6 +393,28 @@ security and circular-dependency notes ended up living.
 - mdBook published to GitHub Pages
 - All four Diátaxis quadrants complete
 - **v0.1.0**
+
+### What Phase 5 handed it
+
+Three things arrive here with the reasoning already settled. None is a new decision to take.
+
+- **The chart is where container hardening becomes enforceable** (known open item 18).
+  `compose.yaml` runs the relay read-only with all capabilities dropped and `just e2e` proves it,
+  but the Kubernetes half — `readOnlyRootFilesystem`, `seccompProfile: RuntimeDefault`, the two
+  writable mounts, `fsGroup` on the SQLite PVC — exists only as a documented fragment in
+  `how-to/harden-a-deployment.md`. A fragment nothing checks drifts from the code that has to
+  honour it; the chart is the first place something can assert it.
+- **The chart packages `deploy/alertthread.rules.yaml`.** It ships as a plain `groups:` file
+  specifically so `promtool check rules` can validate it and a chart can embed it verbatim under
+  a `PrometheusRule`'s `.spec` — that was the reason for not wrapping it in a CRD in Phase 5. It
+  travels with the circular-dependency warning in its own header, and a test asserts that warning
+  is still there, so packaging must not strip it. Every threshold in it is a starting point
+  rather than a measurement, `alertthread_outbox_oldest_age_seconds > 300` most of all: same
+  status as item 1's `collapse_threshold`, revisit against real volume.
+- **`alertthread replay` is designed and not built** (known open item 14,
+  [ADR 003 §5.2](docs/src/adr/003-hardening-divergences.md)). A binary subcommand, not an
+  `/admin` endpoint. It gets its own PR and does not have to wait for the release work, but it is
+  the remaining gap in "a parked alert can always be recovered" and should not ship after v0.1.0.
 
 **Exit:** home-ops can consume this exactly like any other third-party app.
 
@@ -405,11 +432,11 @@ a `/still-firing` slash command.
 2. Whether group summaries should list members inline as well as threading them (ADR).
 3. Whether to publish `alertthread-core` to crates.io as a reusable Alertmanager payload
    library. Costs API-stability obligations; decide at Phase 6, not before.
-4. **ADR 001 D9 says template rendering "panics or errors"**, but `panic = "abort"` in the
-   release profile makes `catch_unwind` dead code in every shipped build. What Phase 3 built
-   instead is a stronger guarantee — no rendering path *can* panic, enforced by the workspace
-   lint denials — but it is not what D9 describes. Reword D9, or accept the divergence
-   explicitly.
+4. ~~**ADR 001 D9 says template rendering "panics or errors"**, but `panic = "abort"` in the
+   release profile makes `catch_unwind` dead code in every shipped build.~~ **Recorded in
+   [ADR 003 §2.1](docs/src/adr/003-hardening-divergences.md): the divergence is accepted
+   explicitly and D9 is not reworded.** The guarantee built is the stronger one — no rendering
+   path *can* panic — and it is enforced by the workspace lint denials rather than asserted.
 5. **One equivalent mutant is excluded by name**, `replace > with >= in persist_group`,
    currently `crates/store/src/sqlite.rs:488`. `rows_affected()` is unsigned, so `>= 0` is a
    tautology, and the fall-through it controls is unreachable on SQLite — no test worth
@@ -417,36 +444,24 @@ a `/still-firing` slash command.
    the argument; cite it by name and not by line, because the line moves whenever anything
    above it does. The other two mutants at the same site, `> with ==` and `> with <`, are
    deliberately still gated and both caught.
-6. **ADR 003 should collect the Phase 3–4 gaps** once Phase 4 lands, the way ADR 002 batched
-   Phases 1–2. Deliberately batched: one ADR per finding would make the numbering noise
-   rather than signal. Items 4, 7, 8 and 9 above are candidates, along with the eight
-   decisions listed in PR #7's body.
-7. **`group_message.group_labels` is not in ADR 001 D4's schema sketch.** Same class of
-   finding as ADR 002 §3.3's `outbox.dead_lettered_at`: D4 sketched the table before the
-   question of how a summary names itself had been asked. The column is write-once and the
-   reasoning is recorded in both migrations and on `GroupRecord`; the ADR is not rewritten.
-   Fold into ADR 003.
-8. **`/readyz` deliberately does NOT check Slack auth, and D11 says it should.** Argued and
-   decided in review before Phase 4 was written, so this is an explicit divergence rather
-   than a quiet one.
-
-   Readiness controls whether the pod receives webhooks. If Slack auth is broken the correct
-   behaviour is to *accept* the webhook, persist it to the outbox and retry — that is what
-   the outbox is for. Going unready makes Alertmanager's POST fail, it retries a few times,
-   then gives up, and **the alert is lost**: silence, from a condition the outbox was
-   specifically designed to survive. It is worse with replicas, which all share one token
-   and would therefore all flip unready at once, leaving no healthy pod to shed traffic to.
-
-   The store *is* checked, because a relay that cannot reach its store cannot durably accept
-   a delivery, so a 200 would acknowledge an alert it cannot persist.
-
-   Mid-life token revocation is caught instead by a 15-minute background prober feeding
-   `alertthread_slack_auth_valid`, which operators alert on. Three mechanisms, three jobs:
-   startup fails fast on a bad token, `/readyz` gates on the store, the prober catches
-   revocation. Fold into ADR 003.
-9. **`alertthread_slack_auth_valid` is not in D11's metric list.** It exists because of item
-   8 — the prober needs somewhere to put its verdict. Same class as item 7: D11 enumerated
-   the metrics before the question it answers had been asked. Fold into ADR 003.
+6. ~~**ADR 003 should collect the Phase 3–4 gaps** once Phase 4 lands, the way ADR 002 batched
+   Phases 1–2.~~ **Written and merged in the Phase 5 closeout as
+   [ADR 003](docs/src/adr/003-hardening-divergences.md), covering Phases 3–5 rather than 3–4** —
+   Phase 5 was already in flight and splitting the batch would have produced the per-finding
+   numbering noise the batching exists to avoid. It carries items 4, 7, 8, 9, 10, 12, 13, 14, 15,
+   16 and 17.
+7. ~~**`group_message.group_labels` is not in ADR 001 D4's schema sketch.**~~ **Recorded in
+   [ADR 003 §3.1](docs/src/adr/003-hardening-divergences.md), grouped with items 9 and 17 as
+   one class of finding: a set enumerated before the question it answers had been asked.** Same
+   class as ADR 002 §3.3's `outbox.dead_lettered_at` — D4 again, one phase later, and this time
+   D11 as well. D4 is not rewritten.
+8. ~~**`/readyz` deliberately does NOT check Slack auth, and D11 says it should.**~~ **Recorded
+   in [ADR 003 §2.2](docs/src/adr/003-hardening-divergences.md) with the full argument**, which
+   is why it moved out of here: going unready on a broken token makes Alertmanager's POST fail
+   and the alert is lost, which is silence produced by a readiness probe from the exact condition
+   the outbox exists to survive. The ADR also carries the three-mechanisms table.
+9. ~~**`alertthread_slack_auth_valid` is not in D11's metric list.**~~ **Recorded in
+   [ADR 003 §3.2](docs/src/adr/003-hardening-divergences.md)**, grouped with items 7 and 17.
 10. ~~**`just mutants` exits non-zero, and that is currently expected.**~~ **Resolved in
     Phase 5 PR A: the gate was narrowed, not excluded.** The recipe still runs
     `--workspace` and still prints every survivor on every run; only its *exit code* is
@@ -461,6 +476,9 @@ a `/still-firing` slash command.
     stubbed assertion in `Policy::validate`'s tests made it exit `1` naming the two core
     survivors, and the app crate's existing `shutdown.rs` timeouts made it print three
     survivors and exit `0`.
+
+    Recorded as a settled decision in
+    [ADR 003 Part 6](docs/src/adr/003-hardening-divergences.md) alongside item 15.
 11. ~~**`just ci` runs neither the image job nor `just e2e`.**~~ **Resolved in Phase 5 PR B:
     both, as decided in review.** `just pre-push` is `check-engine`, `check-rules`, `ci`,
     `image` and `e2e`, in that order so the cheapest failure comes first; AGENTS.md now says
@@ -482,63 +500,60 @@ a `/still-firing` slash command.
     outage is no longer treated as a bad token. Container ordering in the demo stack stops
     being load-bearing as a side effect.
 
-13. **A dead-lettered op is recovered by an all-or-nothing sweep, not selectively.** Phase 5
-    PR A added `StateStore::revive_dead_letters`, fired by the auth prober on an
-    invalid→valid transition, and it returns *every* parked row rather than only the ones
-    parked for an auth reason. Reviving selectively would need the low-cardinality reason
-    persisted per row — an `outbox` column and a `dead_letter` signature change — and the
-    coarse version's cost is bounded and self-correcting: a row parked for `msg_too_long`
-    fails once more and re-parks, at one Slack call, on an event that only happens when a
-    human has just fixed something. Revisit if a deployment ever accumulates enough
-    permanently-unusable rows for that churn to matter.
+    This changed D11's startup behaviour, so it is recorded as a decision in
+    [ADR 003 Part 4](docs/src/adr/003-hardening-divergences.md) with the full disposition
+    table, not only as a struck-through line here.
 
-14. **Nothing revives a dead letter parked for a non-auth reason.** `channel_unusable` is the
-    case that will come up: an operator invites the bot to the channel and the alerts parked
-    before that stay parked, because no probe watches channel membership the way the auth
-    prober watches the token. The row and its payload survive, so recovery is possible by
-    hand; there is no supported command for it yet. Worth an operator-facing path — a
-    `/admin` endpoint behind PR B's bearer token, or a binary subcommand — decided
-    deliberately rather than bolted on.
+13. ~~**A dead-lettered op is recovered by an all-or-nothing sweep, not selectively.**~~
+    **Accepted in the Phase 5 closeout and recorded in
+    [ADR 003 §5.1](docs/src/adr/003-hardening-divergences.md).** The coarse sweep stands: its
+    cost is bounded and self-correcting — a row parked for a non-auth reason fails once more and
+    re-parks, at one Slack call, on an event that only happens when a human has just fixed
+    something — and the cost of getting a *filter* wrong is an alert nobody hears about.
 
-    PR B shipped the bearer token that such an endpoint would sit behind, so the blocker is now
-    only the decision, not the perimeter.
+    **Revisit if** a deployment ever accumulates enough permanently-unusable rows for that churn
+    to matter. That condition survives the acceptance; it is the only thing that would reopen it.
 
-15. **`just pre-push` still does not cover the `test-pg` or MSRV jobs.** Item 11 is resolved for
-    the two recipes it named; these two are what is left, and both are deliberate rather than
-    forgotten.
+14. **Nothing revives a dead letter parked for a non-auth reason — `alertthread replay` is
+    decided and not yet built.** `channel_unusable` is the case that will come up: an operator
+    invites the bot to the channel and the alerts parked before that stay parked, because no
+    probe watches channel membership the way the auth prober watches the token. The row and its
+    payload survive, so recovery is possible by hand; there is no supported command for it.
 
-    `just test-pg` needs the compose stack up. Folding `just up` into `pre-push` would mean
-    `just down --volumes` around it, which destroys whatever a developer had running — a recipe
-    that eats your dev database to check a gate is a recipe people stop running. The MSRV job
-    needs the 1.94 toolchain installed and `RUSTUP_TOOLCHAIN` overriding `rust-toolchain.toml`;
-    a recipe cannot install a toolchain without being the kind of thing nobody wants a task
-    runner doing.
+    **Decided in review and recorded in
+    [ADR 003 §5.2](docs/src/adr/003-hardening-divergences.md): a binary subcommand,
+    `alertthread replay`, not an `/admin` HTTP endpoint.** No new authenticated mutating HTTP
+    surface on the server that accepts webhooks; it works on the `scratch` image via `kubectl
+    exec` because the binary is already there, with the cluster's own RBAC as the authorization
+    decision; and the operator running it has just fixed something by hand and is already at a
+    shell.
 
-    Both are named in AGENTS.md and in `pre-push`'s own closing output, so the gap is stated
-    rather than implied. The honest fix is either a `pre-push-full` that manages the stack
-    explicitly, or accepting that two jobs are CI's alone.
+    **Still open: the implementation.** It gets its own PR. Do not re-argue the shape.
 
-16. **A `401` on the webhook loses the alerts in that delivery, and that is a deliberate
-    exception to "silence is never a valid outcome".** Alertmanager retries `5xx` and `429`, not
-    `4xx`, so a refused delivery is never re-sent.
+15. ~~**`just pre-push` still does not cover the `test-pg` or MSRV jobs.**~~ **Accepted as
+    documented in the Phase 5 closeout: the two jobs are CI's alone, and there is no
+    `pre-push-full`.** Recorded in
+    [ADR 003 Part 6](docs/src/adr/003-hardening-divergences.md) alongside item 10.
 
-    The alternative — accepting a delivery that failed authentication — is not a trade this
-    project gets to make for a user who asked for a perimeter. What it does instead is refuse to
-    be quiet about it: ERROR on every refusal, two `outcome` label values separating "no
-    credential" from "wrong credential", and `AlertthreadWebhookUnauthenticated` in the shipped
-    rules. The token is also off by default, so the failure mode requires somebody to have
-    turned it on.
+    `just test-pg` needs the compose stack up, and folding `just up` in would mean
+    `just down --volumes` around it — a recipe that eats a developer's dev database to check a
+    gate is a recipe people stop running. The MSRV job needs the 1.94 toolchain installed and
+    `RUSTUP_TOOLCHAIN` overriding `rust-toolchain.toml`, and a task runner that installs
+    toolchains is not a thing anybody wants. Both gaps are named in AGENTS.md and in
+    `pre-push`'s own closing output, so the limit is stated rather than implied.
 
-    Worth stating in ADR 003 next to D9's table, because D9's "every degradation path terminates
-    in post a plain message" now has two documented exceptions and the other one (`400` on an
-    unparseable body) was already recorded only in passing.
+16. ~~**A `401` on the webhook loses the alerts in that delivery, and that is a deliberate
+    exception to "silence is never a valid outcome".**~~ **Recorded in
+    [ADR 003 Part 1](docs/src/adr/003-hardening-divergences.md), next to D9's table**, which is
+    where it belonged: D9's "every degradation path terminates in post a plain message" has two
+    documented exceptions and the ADR now states both, along with the invariant that actually
+    holds — *once a delivery has been accepted, no path terminates in silence.* The `400` on an
+    unparseable body, previously recorded only in passing, is written down there too.
 
-17. **`alertthread_webhook_requests_total{outcome="auth_missing"|"auth_mismatch"}` are not in
-    D11's metric list.** Same class as items 7 and 9: D11 specified the bearer token under
-    "Security" and the metrics under "Observability", and did not connect the two. Splitting the
-    two values is the same argument as `source` on `alertthread_rate_limited_total` — the
-    operator's next action differs — with the extra wrinkle that the split is *deliberately
-    invisible from outside*, since every refusal is an identical `401`.
+17. ~~**`alertthread_webhook_requests_total{outcome="auth_missing"|"auth_mismatch"}` are not in
+    D11's metric list.**~~ **Recorded in
+    [ADR 003 §3.3](docs/src/adr/003-hardening-divergences.md)**, grouped with items 7 and 9 as
+    one class of finding rather than stated three times.
 
 18. **Nothing enforces the container hardening, and the alert thresholds are guesses.** Two
     findings from PR B that both land in Phase 6's lap.
