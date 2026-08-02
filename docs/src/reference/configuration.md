@@ -710,5 +710,12 @@ before the configuration file has been read.
 | `ALERTTHREAD_LOG_FORMAT` | human-readable | Set to `json` for structured output |
 | `ALERTTHREAD_CONFIG` | unset | Path to the YAML file, if not given as the first argument |
 
+⚠️ **All three currently make the relay refuse to start**, with
+`unknown field: found \`log\`` or similar. The `ALERTTHREAD_` environment layer reads a name
+with no `__` in it as a *top-level* configuration key, and an unrecognised key is fatal — see
+ROADMAP known open item 22. Until that is fixed, pass the configuration file as the first
+argument instead, and there is no way to change the log filter (`RUST_LOG` is not read).
+Nested names such as `ALERTTHREAD_STORAGE__URL` are unaffected.
+
 JSON is not the default because the first thing anybody does with this binary is run it in a
 terminal, and a wall of JSON there is structured without being clear.

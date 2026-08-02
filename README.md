@@ -24,9 +24,10 @@ Both halves are needed. `chat.update` does not bump the message, mark the channe
 notify — so an in-place edit alone is invisible to anyone watching. The threaded reply
 generates the unread indicator without re-posting to the channel.
 
-> ⚠️ **Status: under construction.** Phase 0 (foundations) is complete — workspace, gates,
-> CI, and a validated `scratch` container image. The relay itself is not implemented yet.
-> See [`ROADMAP.md`](ROADMAP.md) for the phased plan.
+> ⚠️ **Status: pre-release.** The relay is built, hardened and end-to-end tested, and the
+> Helm chart is in the tree. What is not done is the *publishing* — no images are pushed, no
+> chart is published, and there is no v0.1.0 tag yet, so installing means building from this
+> repository. See [`ROADMAP.md`](ROADMAP.md) for what is left.
 
 ## Why this exists
 
@@ -92,9 +93,26 @@ including how to prove the bypass works before you need it.
 
 ## Storage
 
-SQLite by default, with no external dependency — exactly one replica, enforced at startup.
-PostgreSQL is opt-in and enables horizontal scaling. Both are exercised by one shared
-conformance suite, so the HA path is continuously verified rather than theoretical.
+SQLite by default, with no external dependency — exactly one replica. PostgreSQL is opt-in
+and enables horizontal scaling. Both are exercised by one shared conformance suite, so the HA
+path is continuously verified rather than theoretical.
+
+## Install
+
+A Helm chart is in [`charts/alertthread`](charts/alertthread), and it is where the container
+hardening is enforced rather than described: read-only root filesystem, every capability
+dropped, `seccompProfile: RuntimeDefault`, non-root uid 65532, and the two writable mounts
+SQLite needs — each asserted by `just chart` on every run.
+
+```bash
+helm install alertthread ./charts/alertthread \
+    --namespace observability --create-namespace \
+    --set config.slack.default_channel='#alerts' \
+    --set slack.existingSecret=alertthread-slack
+```
+
+[Install with Helm](docs/src/how-to/install-with-helm.md) is the full procedure, including the
+Alertmanager receiver and the alert route that must **not** go through this relay.
 
 ## Documentation
 
@@ -120,7 +138,8 @@ what the container image actually measures and why.
 just            # list recipes
 just test-fast  # inner loop
 just ci         # the fast half of CI: lint, tests + coverage gate, docs, licences
-just pre-push   # ci + the alert-rule check + the image build + the e2e demo
+just chart      # helm lint + the assertions on what the chart renders
+just pre-push   # ci + the rule check + the chart + the image build + the e2e demo
 just up/down    # compose dev stack (podman or docker)
 ```
 

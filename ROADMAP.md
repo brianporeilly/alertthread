@@ -25,8 +25,10 @@ project up will read, and git log does not distinguish "in review" from "abandon
 | 4 — Wiring, PR B | ✅ merged (#13) — mock UI, compose demo, tutorial; the exit criterion is an asserted CI job |
 | 5 — Hardening, PR A | ✅ merged (#15) — resilience: crash recovery, storm-under-load, dead letters, startup auth |
 | 5 — Hardening, PR B | ✅ merged (#16) — webhook bearer auth, container hardening, alert rules, the two Diátaxis pages, `just pre-push` |
-| **5 — closeout** | 🟡 **in review — ADR 003 batching the divergences below** |
-| **6 — Release** | ⬜ **next** |
+| 5 — closeout | ✅ merged (#17) — ADR 003 batching the divergences below |
+| ↳ `alertthread replay` | ✅ merged (#18) — the subcommand ADR 003 §5.2 decided |
+| **6 — Release, PR A** | 🟡 **in review — the Helm chart** |
+| 6 — Release, PR B | ⬜ next — multi-arch images, cosign, SBOM, `release-please`, Pages, v0.1.0 |
 
 ADRs [001](docs/src/adr/001-adr.md), [002](docs/src/adr/002-implementation-gaps.md) and
 [003](docs/src/adr/003-hardening-divergences.md) are merged and accepted.
@@ -190,17 +192,21 @@ alertthread/
 │   ├── store/                  # alertthread-store  — StateStore + backends
 │   ├── slack/                  # alertthread-slack  — client + rendering
 │   └── app/                    # alertthread        — the binary
-├── deploy/                     # raw manifests, for Phase 6 to package
+├── deploy/                     # raw manifests, consumed directly
 │   └── alertthread.rules.yaml  # Prometheus alert rules (ADR 001 D11)
+├── charts/
+│   └── alertthread/            # the Helm chart; PR B publishes it as an OCI artifact
 ├── dev/
 │   └── slack-mock/             # dev-only fake Slack with a web UI
 └── docs/                       # mdBook, Diátaxis
 ```
 
-`deploy/` holds artefacts an operator consumes directly and Phase 6 will wrap in the Helm
-chart. It is deliberately *not* a chart yet: a rules file that `promtool` can check and a chart
-can embed verbatim is useful now, and inventing half a chart to hold it would be Phase 6 work
-done badly.
+`deploy/` holds artefacts an operator consumes directly, without Helm. It stayed a plain
+rules file rather than becoming a chart in Phase 5 precisely so `promtool check rules` could
+validate it and a chart could embed `groups:` verbatim, and that is what
+`charts/alertthread` does. Helm cannot read a file outside its own chart directory, so the
+chart carries a byte-for-byte copy under `files/`; `deploy/` is the original, `just chart-sync`
+updates the copy and `just chart` fails when they differ.
 
 **Dependency direction, enforced by Cargo rather than by review:**
 
@@ -388,10 +394,27 @@ Phases 3–5 produced, batched the way ADR 002 batched Phases 1–2. ADR 001 is 
 
 ## Phase 6 — Release
 
+Split in two. PR A is the chart — the artefact home-ops consumes and the first place the
+container hardening can be *checked* rather than described. PR B is the publishing half:
+nothing in it changes what the relay does, and all of it changes how somebody gets it.
+
+### PR A — the Helm chart
+
+- `charts/alertthread`: Deployment, Service, ServiceAccount, ConfigMap, Secret handling, PVC,
+  probes, `ServiceMonitor`, `PrometheusRule`, `NetworkPolicy`, `NOTES.txt`
+- Container hardening enforced rather than documented, with `scripts/chart-test.py` asserting
+  every field renders (known open item 18)
+- `deploy/alertthread.rules.yaml` embedded verbatim under the `PrometheusRule` `.spec`,
+  circular-dependency warning intact, four thresholds exposed in `values.yaml`
+- `just chart` / `just chart-sync`, reached by `just pre-push` and its own CI job
+
+### PR B — publishing
+
 - Multi-arch (`amd64`/`arm64`) images to ghcr.io
 - Cosign keyless signing + SBOM attestation
-- Helm chart published as an OCI artifact (matching home-ops' existing consumption pattern)
-- `release-please` for changelog + tagging
+- The chart published as an OCI artifact (matching home-ops' existing consumption pattern)
+- `release-please` for changelog + tagging — including `Chart.yaml`'s `version` and
+  `appVersion`, which PR A left as static numbers
 - mdBook published to GitHub Pages
 - All four Diátaxis quadrants complete
 - **v0.1.0**
@@ -405,7 +428,7 @@ Three things arrive here with the reasoning already settled. None is a new decis
   but the Kubernetes half — `readOnlyRootFilesystem`, `seccompProfile: RuntimeDefault`, the two
   writable mounts, `fsGroup` on the SQLite PVC — exists only as a documented fragment in
   `how-to/harden-a-deployment.md`. A fragment nothing checks drifts from the code that has to
-  honour it; the chart is the first place something can assert it.
+  honour it; the chart is the first place something can assert it. **Done in PR A.**
 - **The chart packages `deploy/alertthread.rules.yaml`.** It ships as a plain `groups:` file
   specifically so `promtool check rules` can validate it and a chart can embed it verbatim under
   a `PrometheusRule`'s `.spec` — that was the reason for not wrapping it in a CRD in Phase 5. It
@@ -560,22 +583,35 @@ a `/still-firing` slash command.
     [ADR 003 §3.3](docs/src/adr/003-hardening-divergences.md)**, grouped with items 7 and 9 as
     one class of finding rather than stated three times.
 
-18. **Nothing enforces the container hardening, and the alert thresholds are guesses.** Two
-    findings from PR B that both land in Phase 6's lap.
+18. ~~**Nothing enforces the container hardening, and the alert thresholds are guesses.**~~
+    **Resolved in Phase 6 PR A, both halves.**
 
-    `compose.yaml` runs the relay read-only with all capabilities dropped and `just e2e` proves
-    it, but the Kubernetes half — `readOnlyRootFilesystem`, `seccompProfile: RuntimeDefault`,
-    `fsGroup` on the SQLite PVC — exists only as a documented fragment in
-    `how-to/harden-a-deployment.md`. The chart is where it becomes real, and where something can
-    check it. Note also that Prometheus and Alertmanager in the dev stack are *not* read-only:
-    both write to a data directory inside their own WORKDIR, and a tmpfs over it comes up with
-    the image directory's ownership while both run as `nobody`. Tried, reverted, commented in
-    place.
+    The hardening is now the Helm chart's defaults and `scripts/chart-test.py` asserts each
+    field renders — `readOnlyRootFilesystem`, `runAsNonRoot`, `runAsUser: 65532`,
+    `seccompProfile: RuntimeDefault`, `capabilities.drop: [ALL]`,
+    `allowPrivilegeEscalation: false`, `fsGroup` on the PVC, and the two writable mounts a
+    read-only rootfs forces the relay to declare. Every one was watched rejecting its own
+    deletion before the PR was opened, and `just chart` runs the checks from `just pre-push`
+    and its own CI job.
 
-    And every threshold in `deploy/alertthread.rules.yaml` is a starting point rather than a
-    measurement — `alertthread_outbox_oldest_age_seconds > 300` most of all. Same status as
-    item 1's `collapse_threshold`: revisit against real volume, and say so in the file, which it
-    does.
+    `just e2e` and `just chart` answer different questions and neither replaces the other:
+    the first proves the relay *runs* under these flags, the second proves the flags are still
+    *set* in what Kubernetes gets. A regression in the second is invisible to the first,
+    because `compose.yaml` holds its own copy of the settings.
+
+    The thresholds ship as written, in `values.yaml`, labelled there as starting points an
+    operator is expected to override — a tunable rule beats no rule. Four are exposed
+    (`outboxOldestAgeSeconds`, `outboxDepth`, `slackCallErrorRatio`,
+    `slackRateLimitedPerSecond`); the rest, including every `> 0`, are not, because there is no
+    threshold below "one" worth setting on an alert nobody was told about. **The revisit
+    survives the resolution**: `alertthread_outbox_oldest_age_seconds > 300` is still a guess
+    with the same status as item 1's `collapse_threshold`, and now it is a guess somebody can
+    change without forking the file.
+
+    Still true and still recorded: Prometheus and Alertmanager in the dev stack are *not*
+    read-only. Both write to a data directory inside their own WORKDIR, and a tmpfs over it
+    comes up with the image directory's ownership while both run as `nobody`. Tried, reverted,
+    commented in place.
 
 19. **`chrono` is soft-deprecated, and the revisit trigger written for it is now too narrow.**
     [chronotope/chrono#1768](https://github.com/chronotope/chrono/issues/1768), open since
@@ -604,6 +640,79 @@ a `/still-firing` slash command.
     every correctness decision for no user-visible benefit. Revisit **after** v0.1.0, not
     during it.
 
+20. **The chart carries a duplicate of `deploy/alertthread.rules.yaml`, and a test is the only
+    thing keeping it honest.** Helm cannot read a file outside its own chart directory —
+    `.Files.Get` is rooted at the chart, and the loader skips symlinks rather than following
+    them, so a symlink would go missing at `helm package` time without erroring. The chart
+    therefore keeps a byte-for-byte copy at `charts/alertthread/files/alertthread.rules.yaml`,
+    `just chart-sync` writes it, and `scripts/chart-test.py` fails when it differs from
+    `deploy/`.
+
+    Every alternative was worse. Hand-copying the rules into a template throws away the single
+    source of truth and the `promtool` check with it. Moving the original into the chart
+    breaks `deploy/`'s reason for existing — an artefact an operator consumes without Helm —
+    and moves the path two gates depend on. Generating the copy at package time leaves a
+    checkout that `helm template` cannot render, which is the thing the chart tests need.
+
+    **Revisit if** Helm ever gains a supported way to include a file from outside a chart, or
+    if `deploy/` stops having non-Helm consumers — at which point the chart's copy becomes the
+    original and `deploy/` becomes the generated one.
+
+    Two smaller seams from the same PR, both PR B's to close: `Chart.yaml`'s `version` and
+    `appVersion` are static and need wiring into `release-please`, and the default
+    `image.repository`/`appVersion` name `ghcr.io/brianporeilly/alertthread:0.1.0`, which does
+    not exist until PR B publishes it.
+
+21. **ADR 001 D4 specifies a Downward API replica check that was never built.** D4 says "if
+    SQLite is configured and `replicas > 1` is detected (via the Downward API), the process
+    **refuses to start**". It does not. Nothing in the relay reads the Downward API, and two
+    processes opening one SQLite file is exactly the corruption D4 was protecting against.
+
+    Phase 6 PR A guards it one level out: the chart refuses to render `replicaCount > 1` on
+    SQLite, with a message naming the backend to switch to. That covers a chart-managed
+    deployment and nothing else — a `kubectl scale`, a raw manifest, or two pods from
+    different releases all walk straight past it.
+
+    Found while writing the chart, not by reading D4; `how-to/enable-ha-postgres.md` had been
+    asserting the check existed since Phase 2. That claim is corrected. **Decide whether to
+    build it** rather than leaving the divergence recorded: the relay half is cheap (read
+    `spec.replicas` from an env var the chart already knows how to set) and it is the only
+    version that holds for somebody not using the chart. Not done here because it is relay
+    behaviour in a release PR, and a change that can refuse to start belongs with tests for
+    every way it can be wrong.
+
+22. **Every documented bare `ALERTTHREAD_*` environment variable makes the relay refuse to
+    start.** Found by booting the relay against the ConfigMap the chart renders, which is a
+    thing nothing had done before.
+
+    `Config::figment` merges `Env::prefixed("ALERTTHREAD_").split("__")`, and `Config` denies
+    unknown fields — deliberately, because a misspelled key is a setting an operator believes
+    is in effect. A name with no `__` in it therefore parses as a *top-level* key:
+
+    | Variable | Parses as | Result |
+    |---|---|---|
+    | `ALERTTHREAD_CONFIG` | `config` | refuses to start |
+    | `ALERTTHREAD_LOG` | `log` | refuses to start |
+    | `ALERTTHREAD_LOG_FORMAT` | `log_format` | refuses to start |
+
+    All three are documented in `reference/configuration.md`, and `run::config_path` reads
+    `ALERTTHREAD_CONFIG` — the code that consumes it is correct and never runs, because the
+    figment layer rejects the variable first. Nested names are unaffected:
+    `ALERTTHREAD_STORAGE__URL` works, which is why nothing noticed.
+
+    Two consequences beyond the obvious. **There is currently no way to set the log filter at
+    all**: `ALERTTHREAD_LOG` refuses to start and `RUST_LOG` is not read — `init_tracing` only
+    ever asks for `ALERTTHREAD_LOG`. `compose.yaml` sets `RUST_LOG` on the relay and it has
+    been inert since Phase 4. And the demo stack never hit the startup failure because it
+    configures the relay entirely through nested names.
+
+    Worked around in Phase 6 PR A rather than fixed: the chart passes the config file as the
+    positional argument, sets no bare `ALERTTHREAD_<WORD>` variable, and a chart test asserts
+    it stays that way. **The fix is relay-side and wants its own PR** — the shape is to skip
+    the three reserved names in the `Env` provider, with a test per name asserting the relay
+    starts with it set, plus one asserting a genuinely unknown key is still fatal, because
+    that fatality is a decision and not an accident.
+
 ## Process notes worth keeping
 
 - **A gate nobody has watched reject something is not a gate.** Phase 0 proved the coverage
@@ -620,6 +729,20 @@ a `/still-firing` slash command.
   *zero*-debounce test next to it. A test can look like the thing holding a branch down
   while a neighbour is doing the work — which is the same lesson as the gate itself, one
   level in.
+- **The chart's hardening assertions were watched rejecting every field they hold down.**
+  Deleting `readOnlyRootFilesystem`, `seccompProfile`, `fsGroup` and the `[ALL]` capability
+  drop each failed `just chart` by name, as did repointing `/readyz` at `/healthz`, shrinking
+  the startup budget below `slack.auth_startup_grace`, removing the `/tmp` mount, drifting the
+  chart's copy of the rules from `deploy/`, breaking a threshold anchor, changing the
+  ServiceMonitor's `jobLabel` out from under `up{job="alertthread"}`, deleting the
+  circular-dependency warning, and moving a token from a Secret into the ConfigMap.
+
+  Writing them found a bug they then caught: the first `prometheusrule.yaml` piped into
+  `regexReplaceAll` with the arguments in the wrong order and rendered a `PrometheusRule` with
+  an **empty `spec:`**. `helm lint --strict` passed it. A well-formed document with nothing in
+  it is exactly the shape of failure this project keeps legislating against, and it is why the
+  assertions parse the objects instead of grepping the text.
+
 - **A gate that rejects everything is not a gate either.** The exclusion above exists
   because the recipe otherwise exits non-zero on a correct tree, forever. That is not the
   safe direction to fail in: an exit code that is always the same carries no information,

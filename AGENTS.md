@@ -198,6 +198,8 @@ just test-pg    # postgres conformance (needs `just up`)
 just coverage   # report only, no gate — for finding the gaps
 just mutants    # mutation testing; required for core changes
 just docs       # mdbook build + link check
+just chart      # helm lint + the assertions on what the chart renders
+just chart-sync # copy deploy/alertthread.rules.yaml into the chart
 just up/down    # compose dev stack (podman or docker, auto-detected)
 just e2e        # the asserted end-to-end demo (needs a container engine)
 just ci         # the fast half of CI: lint, test + coverage gate, docs, licences
@@ -206,8 +208,9 @@ just pre-push   # ci + the alert-rule check + the image build + e2e
 
 **`just ci` is not all of CI, and saying it was cost us a break in `main` once.** Three jobs
 need a container engine and are separate recipes — the image build, `just e2e`, and the
-`promtool` check on `deploy/alertthread.rules.yaml`. `just pre-push` is `ci` plus those three,
-and it fails with a legible message when no engine is present rather than skipping them.
+`promtool` check on `deploy/alertthread.rules.yaml` — and `just chart` needs `helm`.
+`just pre-push` is `ci` plus those four, and it fails with a legible message when a tool is
+missing rather than skipping the job.
 
 **Run `just pre-push` before proposing a change.** Two CI jobs are still outside it and have to
 be run by hand when relevant: `just test-pg` (needs `just up`, and `pre-push` will not tear
@@ -254,7 +257,16 @@ Real ones, discovered the hard way. Each has cost somebody time.
   database, its `-wal` and its `-shm` all live beside `storage.url` and need a declared writable
   mount; `/tmp` needs one too, for the spill file a large SQLite statement would want. If a
   read-only rootfs breaks something, the fix is another declared mount, never relaxing the flag.
-  `compose.yaml` runs the relay under the full set of flags, so `just e2e` proves them.
+  `compose.yaml` runs the relay under the full set of flags, so `just e2e` proves them, and
+  `charts/alertthread` sets the Kubernetes equivalents so `just chart` proves those. The two
+  are separate copies of the same settings: neither check sees a regression in the other's.
+- **Nothing may be mounted inside another mount in the chart.** The image is `scratch` and the
+  root filesystem is read-only, so there is no writable directory for the kubelet to create an
+  inner mount point in. `/etc/alertthread/config`, `/etc/alertthread/secrets/*` and
+  `/etc/alertthread/templates` are siblings for that reason, and a test asserts it.
+- **`deploy/alertthread.rules.yaml` is the original; the chart's copy is generated.** Helm
+  cannot read outside its own chart directory. Edit `deploy/`, run `just chart-sync`, and
+  `just chart` will tell you if you forgot.
 - **`/healthz`, `/readyz` and `/metrics` are never authenticated.** A probe carries no
   credential, so a `401` on the first two is a pod Kubernetes restarts for ever or one that never
   joins the Service, and a `401` on `/metrics` breaks the relay's own alerting. Only
@@ -274,7 +286,7 @@ Real ones, discovered the hard way. Each has cost somebody time.
 ## Definition of done
 
 1. `just pre-push` passes — `ci` including the per-crate coverage gate, plus the alert-rule
-   check, the image build and the end-to-end demo.
+   check, the chart checks, the image build and the end-to-end demo.
 2. Tests exist per the table above, and fail without the change.
 3. `just mutants` exits `0` — no surviving mutants in `core` or `store`, and any new
    survivor it prints elsewhere is triaged in the PR.

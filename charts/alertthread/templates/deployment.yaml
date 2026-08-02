@@ -1,0 +1,215 @@
+{{- include "alertthread.validate" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "alertthread.fullname" . }}
+  labels:
+    {{- include "alertthread.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    {{- if include "alertthread.isSqlite" . }}
+    # One RWO PVC and one SQLite file: a second pod cannot be scheduled while
+    # the first holds the volume, and if it could, two writers would corrupt the
+    # correlation state.
+    type: Recreate
+    {{- else }}
+    type: RollingUpdate
+    {{- end }}
+  selector:
+    matchLabels:
+      {{- include "alertthread.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # The bot token and the webhook token are read once, at startup, so a
+        # rotated Secret needs a restart. Hashing both, plus the config, is what
+        # makes `helm upgrade` deliver one.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if or (not .Values.slack.existingSecret) (and .Values.webhookAuth.enabled (not .Values.webhookAuth.existingSecret)) }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "alertthread.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "alertthread.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: alertthread
+          image: {{ include "alertthread.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          # The positional argument, not ALERTTHREAD_CONFIG. Setting that
+          # variable makes the relay refuse to start — figment's `ALERTTHREAD_`
+          # provider reads it as a top-level key named `config`, which is not
+          # one, and unknown keys are fatal. ROADMAP known open item 22. The same
+          # trap catches ALERTTHREAD_LOG and ALERTTHREAD_LOG_FORMAT, so the chart
+          # sets no bare ALERTTHREAD_<WORD> variable at all and a test asserts it.
+          args:
+            - /etc/alertthread/config/config.yaml
+          {{- if or .Values.postgres.existingSecret .Values.env .Values.extraEnv }}
+          env:
+            {{- if .Values.postgres.existingSecret }}
+            # Environment beats the config file, which is why the connection
+            # string — the one storage setting carrying a password — arrives
+            # here rather than in the ConfigMap.
+            - name: ALERTTHREAD_STORAGE__URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.existingSecret }}
+                  key: {{ .Values.postgres.existingSecretKey }}
+            {{- end }}
+            {{- range $name, $value := .Values.env }}
+            {{- if $value }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ (splitList ":" .Values.config.server.listen) | last | int }}
+              protocol: TCP
+          {{- if .Values.startupProbe.enabled }}
+          startupProbe:
+            httpGet:
+              path: {{ .Values.startupProbe.path }}
+              port: http
+            periodSeconds: {{ .Values.startupProbe.periodSeconds }}
+            failureThreshold: {{ .Values.startupProbe.failureThreshold }}
+          {{- end }}
+          {{- if .Values.livenessProbe.enabled }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.livenessProbe.path }}
+              port: http
+            periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.livenessProbe.failureThreshold }}
+          {{- end }}
+          {{- if .Values.readinessProbe.enabled }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.readinessProbe.path }}
+              port: http
+            periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.readinessProbe.failureThreshold }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            # Siblings under /etc/alertthread, never nested inside each other:
+            # a mount whose parent is itself a read-only volume has no writable
+            # directory to be created in, and the image is `scratch` — nothing
+            # exists in it to mount onto.
+            - name: config
+              mountPath: /etc/alertthread/config
+              readOnly: true
+            - name: slack-token
+              mountPath: /etc/alertthread/secrets/slack
+              readOnly: true
+            {{- if .Values.webhookAuth.enabled }}
+            - name: webhook-token
+              mountPath: /etc/alertthread/secrets/webhook
+              readOnly: true
+            {{- end }}
+            {{- if include "alertthread.hasTemplates" . }}
+            - name: message-templates
+              mountPath: /etc/alertthread/templates
+              readOnly: true
+            {{- end }}
+            {{- if include "alertthread.isSqlite" . }}
+            - name: state
+              mountPath: {{ .Values.persistence.mountPath }}
+            {{- end }}
+            # readOnlyRootFilesystem is not relaxed for SQLite's spill file; the
+            # path is declared instead.
+            - name: tmp
+              mountPath: /tmp
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "alertthread.fullname" . }}
+        - name: slack-token
+          secret:
+            secretName: {{ include "alertthread.slackSecretName" . }}
+            # 0440, not 0400: with fsGroup set, the kubelet gives a secret
+            # volume root:fsGroup ownership, so owner-only would be unreadable
+            # by uid 65532.
+            defaultMode: 0440
+            items:
+              - key: {{ include "alertthread.slackSecretKey" . }}
+                path: token
+        {{- if .Values.webhookAuth.enabled }}
+        - name: webhook-token
+          secret:
+            secretName: {{ include "alertthread.webhookSecretName" . }}
+            # 0440, not 0400: with fsGroup set, the kubelet gives a secret
+            # volume root:fsGroup ownership, so owner-only would be unreadable
+            # by uid 65532.
+            defaultMode: 0440
+            items:
+              - key: {{ include "alertthread.webhookSecretKey" . }}
+                path: token
+        {{- end }}
+        {{- if include "alertthread.hasTemplates" . }}
+        - name: message-templates
+          configMap:
+            name: {{ include "alertthread.fullname" . }}-templates
+        {{- end }}
+        {{- if include "alertthread.isSqlite" . }}
+        - name: state
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "alertthread.pvcName" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- end }}
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.tmpDir.sizeLimit }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}

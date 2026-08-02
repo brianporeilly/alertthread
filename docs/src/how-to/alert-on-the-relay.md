@@ -24,7 +24,12 @@ So the deliverable is two things, and the second is not optional:
 
 ## 1. Load the rules
 
-The file is a plain Prometheus rules file, so it works three ways.
+**With the Helm chart, they are already loaded.** `metrics.prometheusRule.enabled` defaults to
+`true`, and the chart embeds this file verbatim — warning included, plus the same warning as an
+annotation so it survives into the cluster object where a YAML comment does not. Skip to
+[step 2](#2-route-them-away-from-the-relay), which the chart cannot do for you.
+
+Otherwise the file is a plain Prometheus rules file, so it works three ways.
 
 **With the Prometheus Operator**, wrap it in a `PrometheusRule` — `spec` takes the `groups:`
 key verbatim:
@@ -65,6 +70,12 @@ identical to a healthy relay.
 The rules need a scrape job named `alertthread` for `AlertthreadDown` and `AlertthreadAbsent`
 to work. With the operator, that is a `ServiceMonitor`; `/metrics` needs no credentials even
 when the webhook does.
+
+⚠️ A `ServiceMonitor` labels the scrape `job` with the **Service's name** unless `jobLabel`
+says otherwise, and a Helm-installed Service is named after the release. If you write your own
+`ServiceMonitor`, set `jobLabel: app.kubernetes.io/name` or relabel `job` to `alertthread`
+explicitly — otherwise those two rules match nothing, for ever, and that looks exactly like a
+healthy relay. The chart does this and asserts it.
 
 ## 2. Route them away from the relay
 

@@ -7,13 +7,12 @@ not stop alerts reaching Slack.
 store to PostgreSQL is what makes more than one legal. This guide is the switch, start to
 finish, for an existing deployment.
 
-> Why the two backends differ, and why the relay refuses to run SQLite with two replicas, is
-> in [ADR 001 D4](../adr/001-adr.md). This page assumes you have decided to do it.
+> Why the two backends differ, and why SQLite is one replica, is in
+> [ADR 001 D4](../adr/001-adr.md). This page assumes you have decided to do it.
 
-> **Status.** The PostgreSQL store — schema, migrations, the shared-queue lease, the pruner
-> — is complete and continuously tested against a real server as of Phase 2. The `figment`
-> configuration layer and the Deployment that reads it arrive in Phase 4, so the manifests
-> below describe the shape the switch takes rather than something you can apply today.
+> **With the Helm chart this is four values.** Skip to [With the Helm chart](#with-the-helm-chart)
+> and come back here for the parts the chart cannot do — the database, the role, and what
+> happens to the alerts already in flight.
 
 ## Before you start
 
@@ -43,29 +42,50 @@ kind: Secret
 metadata:
   name: alertthread-storage
 stringData:
-  DATABASE_URL: postgres://alertthread:use-a-real-secret@pg-rw.databases.svc:5432/alertthread
+  uri: postgres://alertthread:use-a-real-secret@pg-rw.databases.svc:5432/alertthread
 ```
 
 If your PostgreSQL operator already publishes a connection Secret — CloudNativePG's
-`<cluster>-app` does — reference that instead of writing the password twice.
+`<cluster>-app` does, under the key `uri` — reference that instead of writing the password
+twice.
+
+## With the Helm chart
+
+```yaml
+replicaCount: 3
+config:
+  storage:
+    backend: postgres
+  slack:
+    rate_limit_divisor: 3   # step 7, and the chart cannot infer it
+postgres:
+  existingSecret: alertthread-storage
+  existingSecretKey: uri
+```
+
+That is steps 3 and 4 together: the chart drops the PVC and the state mount, switches the
+Deployment to `RollingUpdate`, and passes the connection string as `ALERTTHREAD_STORAGE__URL`
+from the Secret rather than through the ConfigMap, because it carries a password. Go to
+[step 5](#5-start-one-replica-and-confirm-the-migrations-applied) — roll out at
+`replicaCount: 1` first.
 
 ## 3. Point the relay at it
 
-Two environment variables, and one that is now wrong:
+Two settings, and one that is now wrong:
 
 ```yaml
 env:
-  - name: STATE_BACKEND
+  - name: ALERTTHREAD_STORAGE__BACKEND
     value: postgres
-  - name: DATABASE_URL
+  - name: ALERTTHREAD_STORAGE__URL
     valueFrom:
       secretKeyRef:
         name: alertthread-storage
-        key: DATABASE_URL
+        key: uri
 ```
 
-Remove any `STATE_BACKEND=sqlite` and any SQLite path still set. Leaving both is not
-ambiguous — `STATE_BACKEND` decides — but it is the sort of thing that misleads whoever
+Remove any `ALERTTHREAD_STORAGE__BACKEND=sqlite` and any SQLite path still set. Leaving both
+is not ambiguous — the backend decides — but it is the sort of thing that misleads whoever
 reads the manifest next.
 
 ## 4. Drop the PVC and change the deploy strategy
@@ -152,7 +172,7 @@ $ kubectl delete pod <the one that posted>     # kill it mid-flight
 
 The alert's resolution should still update the original message, from a different pod. If it
 posts a fresh "resolved" message instead, the replicas are not sharing state — check that
-every pod has the same `DATABASE_URL` and that none is still on SQLite.
+every pod has the same `storage.url` and that none is still on SQLite.
 
 ## What happens to the alerts already in flight
 
@@ -176,11 +196,14 @@ and that is the property being relied on here.
 ## Going back to SQLite
 
 Reverse steps 3 and 4, and scale to **exactly one replica before** changing
-`STATE_BACKEND`. The relay refuses to start as SQLite when it detects more than one replica,
-so doing it the other way round leaves you with a Deployment that will not roll.
+`storage.backend`. Two processes on one SQLite file corrupts correlation state, and nothing in
+the relay stops you: [ADR 001 D4](../adr/001-adr.md) specifies a Downward API replica check and
+it was never built (ROADMAP known open item 21). The Helm chart refuses to render
+`replicaCount > 1` on SQLite, which covers a chart-managed deployment and nothing else.
 
 ## Related
 
+- [Install with Helm](install-with-helm.md) — the chart, including this switch as four values.
 - [Configuration reference: `storage`](../reference/configuration.md) — every option, its
   environment variable, and its default.
 - [ADR 001 D4](../adr/001-adr.md) — why there are two backends and what each one costs.

@@ -8,3 +8,4 @@ mutants.out.old/
 *.db
 *.db-shm
 *.db-wal
+charts/

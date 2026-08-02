@@ -1,0 +1,26 @@
+{{- if and (include "alertthread.isSqlite" .) .Values.persistence.enabled (not .Values.persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "alertthread.pvcName" . }}
+  labels:
+    {{- include "alertthread.labels" . | nindent 4 }}
+  annotations:
+    {{- with .Values.persistence.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- if .Values.persistence.retain }}
+    # The outbox may hold alerts that were accepted and never delivered, so the
+    # volume outlives `helm uninstall` unless persistence.retain is turned off.
+    helm.sh/resource-policy: keep
+    {{- end }}
+spec:
+  accessModes:
+    {{- toYaml .Values.persistence.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size }}
+  {{- if .Values.persistence.storageClass }}
+  storageClassName: {{ .Values.persistence.storageClass }}
+  {{- end }}
+{{- end }}

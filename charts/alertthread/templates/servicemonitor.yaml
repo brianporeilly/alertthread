@@ -1,0 +1,37 @@
+{{- if .Values.metrics.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "alertthread.fullname" . }}
+  labels:
+    {{- include "alertthread.labels" . | nindent 4 }}
+    {{- with .Values.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  # Without this the `job` label is the Service's name, which carries the release
+  # name — and `up{job="alertthread"}` in the rules would then match nothing, for
+  # ever, while looking exactly like a healthy relay.
+  jobLabel: {{ .Values.metrics.serviceMonitor.jobLabel }}
+  selector:
+    matchLabels:
+      {{- include "alertthread.selectorLabels" . | nindent 6 }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    - port: http
+      path: /metrics
+      # /metrics carries no credential even when the webhook does: Prometheus
+      # sends none by default, and a 401 here breaks the relay's own alerting.
+      interval: {{ .Values.metrics.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.metrics.serviceMonitor.scrapeTimeout }}
+      {{- with .Values.metrics.serviceMonitor.relabelings }}
+      relabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.metrics.serviceMonitor.metricRelabelings }}
+      metricRelabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

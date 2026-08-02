@@ -4,9 +4,19 @@ Two independent jobs: **close the webhook** with a bearer token, and **close the
 with a read-only root filesystem, no capabilities and a seccomp profile. Do them in either
 order.
 
-There is no chart yet — Phase 6 packages one — so the Kubernetes fragments below are meant to
-be pasted into whatever you deploy with. The compose stack in this repository already runs the
-relay with every one of these settings, which is how they are kept working.
+**If you deploy with the Helm chart, the container half is already done.** Every setting in
+[Close the container](#close-the-container) is a chart default, and `just chart` asserts each
+one renders — so the fragments below describe what
+[`charts/alertthread`](https://github.com/brianporeilly/alertthread/tree/main/charts/alertthread)
+produces rather than something you have to paste. See
+[Install with Helm](install-with-helm.md). Read on anyway if you deploy some other way, or if
+you want to know what the chart is doing and why.
+
+The webhook token is two-sided — the relay and the Alertmanager receiver — and the chart can
+only do the relay's half, so that section applies whatever you deploy with.
+
+The compose stack in this repository runs the relay under the same flags and `just e2e` drives
+it, which is how they are kept working at runtime rather than only on paper.
 
 ## Require a bearer token on the webhook
 
@@ -22,6 +32,18 @@ kubectl -n observability create secret generic alertthread-webhook \
 ```
 
 ### 2. Point the relay at it
+
+With the chart, that is two values — it mounts the Secret and sets
+`server.auth_token_file` for you:
+
+```yaml
+webhookAuth:
+  enabled: true
+  existingSecret: alertthread-webhook
+  existingSecretKey: token
+```
+
+By hand:
 
 ```yaml
 env:
@@ -157,6 +179,14 @@ gone: **it does not retry a `401`.** `deploy/alertthread.rules.yaml` includes
 The image is already non-root: it is `scratch`, with `USER 65532:65532` baked in and no shell,
 no package manager and no writable path in it at all. What is left is the runtime side.
 
+**This section used to be advice.** It is now the chart's defaults, under
+`podSecurityContext` and `securityContext` in
+[`values.yaml`](https://github.com/brianporeilly/alertthread/blob/main/charts/alertthread/values.yaml),
+and `scripts/chart-test.py` fails if any one of them stops rendering — including the two
+writable mounts. That check exists because a documented fragment nothing verifies drifts from
+the code that has to honour it, which it did for a whole phase (ROADMAP known open item 18).
+Change a value here and change it there, or the test will tell you.
+
 ```yaml
 securityContext:
   runAsNonRoot: true
@@ -211,12 +241,23 @@ volumes:
 
 The PVC must be writable by uid 65532. `fsGroup: 65532` in the pod's `securityContext` is the
 usual way; some CSI drivers need `fsGroupChangePolicy: OnRootMismatch` to avoid rechowning the
-whole volume on every start.
+whole volume on every start. The chart sets both.
+
+Note that a mounted Secret is affected by the same setting: with `fsGroup` set the kubelet
+gives the volume `root:fsGroup` ownership, so a `defaultMode` of `0400` is unreadable by uid
+65532 and `0440` is what works.
 
 On SQLite the deployment must also be `strategy: Recreate` with exactly one replica — two
-processes on one SQLite file is not a supported configuration. See
-[Enable HA with PostgreSQL](enable-ha-postgres.md) for the other shape, which has no PVC and
-no `/var/lib` mount at all.
+processes on one SQLite file is not a supported configuration. The chart refuses to render
+`replicaCount > 1` on SQLite for that reason; the relay itself does not detect it (ROADMAP
+known open item 21). See [Enable HA with PostgreSQL](enable-ha-postgres.md) for the other
+shape, which has no PVC and no `/var/lib` mount at all.
+
+Nothing may be mounted *inside* one of these mounts, either. The parent is read-only and the
+image is `scratch`, so there is no writable directory for the kubelet to create the inner
+mount point in. The chart keeps `/etc/alertthread/config`, `/etc/alertthread/secrets/*` and
+`/etc/alertthread/templates` as siblings for exactly this reason, and a test asserts they stay
+that way.
 
 ### Check it
 
@@ -238,8 +279,14 @@ startup, loudly, with `unable to open database file` — see
 so the hardening is exercised on every CI run rather than being advice. If you want to see the
 failure mode instead, remove the `tmpfs` entry for `/data` and run `just e2e`.
 
+The two checks answer different questions and neither replaces the other. `just e2e` proves
+the relay *runs* under these flags; `just chart` proves the flags are still *set* in what
+Kubernetes will be given. A regression in the second is invisible to the first, because the
+compose stack has its own copy of the settings.
+
 ## Where to look next
 
+- [Install with Helm](install-with-helm.md) — where every setting on this page is a default
 - [Alert on the relay](alert-on-the-relay.md) — and why the rules must not be routed through it
 - [Configuration](../reference/configuration.md) — `server.auth_token` and `server.auth_token_file`
 - [HTTP API](../reference/http-api.md) — the status codes, including the `401`

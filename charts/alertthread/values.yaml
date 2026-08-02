@@ -1,0 +1,415 @@
+# Default values for alertthread.
+#
+# The comments on this page are documentation and are meant to be read. Every
+# setting under `config:` maps one-for-one onto a key in
+# docs/src/reference/configuration.md, which is the authority on what each one
+# means; this file says how to reach it from Helm and what the chart does with
+# it.
+#
+# Installing needs exactly two answers: where to post, and which Secret holds
+# the bot token.
+#
+#     helm install alertthread oci://ghcr.io/brianporeilly/charts/alertthread \
+#         --set config.slack.default_channel='#alerts' \
+#         --set slack.existingSecret=alertthread-slack
+
+# ---------------------------------------------------------------------------
+# Image
+# ---------------------------------------------------------------------------
+
+image:
+  repository: ghcr.io/brianporeilly/alertthread
+  # Empty means "the chart's appVersion". Pin a digest here in anything you
+  # care about; a tag is mutable and this is alerting infrastructure.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# ---------------------------------------------------------------------------
+# Replicas
+# ---------------------------------------------------------------------------
+
+# More than one replica requires config.storage.backend=postgres. The chart
+# refuses to render `replicaCount > 1` on SQLite rather than letting two
+# processes open one database file — ADR 001 D4, and
+# docs/src/how-to/enable-ha-postgres.md is the migration.
+replicaCount: 1
+
+# ---------------------------------------------------------------------------
+# Secrets
+# ---------------------------------------------------------------------------
+#
+# Both tokens are mounted as files and named to the relay as
+# `slack.token_file` / `server.auth_token_file`. Neither is ever put in an
+# environment variable or into the ConfigMap: a file is the shape the relay
+# documents for Kubernetes, and it keeps the value out of `kubectl describe
+# pod` and out of anything that dumps a container's environment.
+
+slack:
+  # The name of an existing Secret holding the bot token. This is the shape to
+  # use: nothing about the token then passes through Helm, your values file or
+  # your git history.
+  existingSecret: ""
+  existingSecretKey: token
+
+  # Or let the chart create the Secret from this value. Convenient for a first
+  # install and a liability afterwards — `helm get values` prints it back, and
+  # so does anything that stores your values file. Prefer existingSecret.
+  token: ""
+
+webhookAuth:
+  # Require `Authorization: Bearer <token>` on POST /webhook. Off by default,
+  # matching the relay: turning it on without reconfiguring the Alertmanager
+  # receiver makes every delivery a 401, and Alertmanager does not retry a 401.
+  # docs/src/how-to/harden-a-deployment.md is the two-sided procedure.
+  enabled: false
+  existingSecret: ""
+  existingSecretKey: token
+  token: ""
+
+postgres:
+  # PostgreSQL connection strings carry a password, so `config.storage.url` is
+  # the wrong place for one. Name a Secret here instead and the chart passes it
+  # as ALERTTHREAD_STORAGE__URL via secretKeyRef, which wins over the config
+  # file. CloudNativePG's `<cluster>-app` Secret publishes a `uri` key.
+  existingSecret: ""
+  existingSecretKey: uri
+
+# ---------------------------------------------------------------------------
+# Relay configuration
+# ---------------------------------------------------------------------------
+#
+# Rendered verbatim into a ConfigMap and mounted at /etc/alertthread/config.yaml.
+# Anything you add here reaches the relay, so a key this build does not know is
+# a startup failure by design (an unrecognised key is a setting somebody
+# believes is in effect). The two secrets above are injected separately.
+
+config:
+  storage:
+    # sqlite (default, exactly one replica) or postgres (N replicas).
+    backend: sqlite
+    # On SQLite this must sit under persistence.mountPath: the database, its
+    # -wal and its -shm all have to be on the same writable filesystem, and the
+    # root filesystem is read-only.
+    #
+    # On PostgreSQL, leave this and set postgres.existingSecret instead.
+    url: sqlite:///var/lib/alertthread/state.sqlite
+    retention:
+      resolved: 7d
+      stale: 30d
+      interval: 1h
+
+  server:
+    listen: "0.0.0.0:8080"
+    request_timeout: 15s
+    # Keep podTerminationGracePeriodSeconds comfortably above this.
+    shutdown_grace: 20s
+
+  slack:
+    # Required. Where to post when the webhook URL carries no ?channel=.
+    # Either "#alerts" or a channel id. The relay refuses to start without it.
+    default_channel: ""
+    base_url: https://slack.com/api/
+    timeout: 15s
+    # Set this to replicaCount when running more than one: each replica holds
+    # its own token bucket, so the aggregate post rate is N times the per-process
+    # one (ADR 001 D2).
+    rate_limit_divisor: 1
+    auth_probe_interval: 15m
+    # How long a *transient* startup auth.test failure is retried before the
+    # relay starts anyway, degraded. A definitively rejected token still refuses
+    # to start; a Slack outage does not.
+    #
+    # startupProbe below must outlast this — see the note there.
+    auth_startup_grace: 30s
+
+  resolve:
+    update_in_place: true
+    thread_reply: true
+
+  collapse:
+    threshold: 5
+    refresh_debounce: 60s
+
+  worker:
+    batch_size: 64
+    lease: 60s
+    idle_poll: 250ms
+    max_attempts: 10
+    backoff_base: 4s
+    backoff_max: 10m
+    sample_interval: 15s
+
+# Message template overrides (ADR 001 D10). Any key set here is written to a
+# ConfigMap, mounted at /etc/alertthread/templates and named to the relay as
+# `templates.dir`. Leave them all empty to keep the four built-ins. An override
+# that will not compile is dropped and its built-in kept, so a broken template
+# degrades rather than stopping the relay.
+templates:
+  firing: ""
+  resolved: ""
+  group_summary: ""
+  thread_reply: ""
+
+# Extra environment for the relay container, as name: value.
+#
+# ⚠️ Do not set a bare `ALERTTHREAD_<WORD>` variable here. The relay reads its
+# environment with the prefix `ALERTTHREAD_` and `__` between nested keys, and
+# an unrecognised key is fatal at startup by design — so `ALERTTHREAD_CONFIG`,
+# `ALERTTHREAD_LOG` and `ALERTTHREAD_LOG_FORMAT` each parse as a top-level
+# setting that does not exist and the relay refuses to start. That is ROADMAP
+# known open item 22, it is a relay bug rather than a chart one, and until it is
+# fixed there is no working way to set the log filter. A chart test asserts none
+# is set, so this cannot be reintroduced by accident.
+#
+# Nested names are fine: `ALERTTHREAD_STORAGE__URL` and the like work, and are
+# how the chart passes the PostgreSQL connection string.
+env: {}
+
+# Raw entries appended to the container's env, for a valueFrom you need and this
+# chart does not model. The same warning applies.
+extraEnv: []
+
+# ---------------------------------------------------------------------------
+# Storage
+# ---------------------------------------------------------------------------
+
+persistence:
+  # A PVC for the SQLite database. Ignored entirely when
+  # config.storage.backend is postgres — that deployment has no local state.
+  #
+  # Disabling this on SQLite gives you an emptyDir, which means every restart
+  # loses the outbox and the correlation state. That is alerts that were
+  # accepted and never delivered, so the chart says so at install time.
+  enabled: true
+  existingClaim: ""
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 1Gi
+  annotations: {}
+  # The mount point. config.storage.url must be a path underneath it.
+  mountPath: /var/lib/alertthread
+  # Keep the PVC when the release is uninstalled. The outbox may still hold
+  # undelivered alerts.
+  retain: true
+
+# /tmp, where SQLite would put a spill file if a statement ever needed one.
+# Nothing does today; the mount costs nothing and turns a future crash on a
+# read-only root filesystem into a non-event.
+tmpDir:
+  sizeLimit: 16Mi
+
+# ---------------------------------------------------------------------------
+# Hardening
+# ---------------------------------------------------------------------------
+#
+# These are not defaults to be tuned. They are the settings
+# docs/src/how-to/harden-a-deployment.md specifies, made enforceable, and a
+# chart test asserts each one renders. The image is `scratch` with USER
+# 65532:65532 baked in and no shell in it at all; what is below is the runtime
+# half Kubernetes will not supply on its own.
+#
+# seccompProfile in particular has to be spelled out: Kubernetes defaults to
+# Unconfined unless the kubelet's SeccompDefault gate is on, unlike podman and
+# docker which apply their default profile automatically.
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  # Makes the PVC writable by uid 65532. Without it the relay cannot create the
+  # database and fails at startup with `unable to open database file`.
+  fsGroup: 65532
+  # Some CSI drivers rechown the whole volume on every start without this.
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  privileged: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  # The relay touches no Kubernetes API — it receives a webhook, keeps state and
+  # calls three Slack endpoints. It has no use for a projected token.
+  automountServiceAccountToken: false
+
+# ---------------------------------------------------------------------------
+# Networking
+# ---------------------------------------------------------------------------
+
+service:
+  type: ClusterIP
+  port: 8080
+  annotations: {}
+  labels: {}
+
+# A NetworkPolicy restricting port 8080 to the namespaces that need it. This is
+# how to close /healthz, /readyz and /metrics if you must: the relay will not
+# authenticate them, because a probe carries no credential and a 401 there is a
+# pod Kubernetes restarts for ever.
+#
+# Probes come from the node and are not affected by an ingress policy.
+networkPolicy:
+  enabled: false
+  # Namespaces allowed to reach the webhook and the metrics endpoint, by label.
+  ingressNamespaceSelectors:
+    - matchLabels:
+        kubernetes.io/metadata.name: monitoring
+
+# ---------------------------------------------------------------------------
+# Probes
+# ---------------------------------------------------------------------------
+#
+# /healthz never checks the store: a database blip must not restart a pod that
+# is correctly buffering alerts. /readyz checks the store and deliberately does
+# NOT check Slack auth (ADR 003 §2.2) — going unready on a broken token makes
+# Alertmanager's POST fail and loses the alert, which is silence produced by a
+# readiness probe. Do not repoint these at each other.
+
+startupProbe:
+  enabled: true
+  path: /healthz
+  periodSeconds: 2
+  # 2s x 30 = 60s, which must stay above config.slack.auth_startup_grace (30s).
+  # During the grace window the relay is retrying a transient auth.test and is
+  # serving nothing at all, so a startup budget shorter than the grace turns a
+  # Slack outage into CrashLoopBackOff — which looks exactly like a bad token
+  # and is not one. A chart test pins this relationship.
+  failureThreshold: 30
+
+livenessProbe:
+  enabled: true
+  path: /healthz
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+readinessProbe:
+  enabled: true
+  path: /readyz
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# ---------------------------------------------------------------------------
+# Monitoring
+# ---------------------------------------------------------------------------
+
+metrics:
+  serviceMonitor:
+    # Both this and prometheusRule below default on, and neither is gated on a
+    # `.Capabilities.APIVersions.Has` check. That is deliberate: a capabilities
+    # check silently drops the object when the CRD is missing, and the result is
+    # a relay that looks monitored and is not. Missing CRDs should fail the
+    # install, loudly. Set these to false if you scrape some other way.
+    enabled: true
+    interval: 30s
+    scrapeTimeout: 10s
+    # Extra labels, for a Prometheus whose serviceMonitorSelector needs one.
+    # kube-prometheus-stack's default is `release: <your release name>`.
+    labels: {}
+    # Which Service label supplies the `job` label on every scraped series.
+    # It resolves to "alertthread", which is what `up{job="alertthread"}` in the
+    # alert rules below selects on. Change one and you must change the other;
+    # a chart test asserts they still agree, because a rule whose job label
+    # matches nothing evaluates empty for ever and looks like a healthy relay.
+    jobLabel: app.kubernetes.io/name
+    relabelings: []
+    metricRelabelings: []
+
+  prometheusRule:
+    enabled: true
+    # Extra labels, for a Prometheus whose ruleSelector needs one.
+    labels: {}
+
+    # ⚠️ THE RELAY CANNOT ALERT ON ITSELF THROUGH ITSELF.
+    #
+    # Every rule here describes a way the relay stops delivering to Slack, so
+    # routing them through the relay means the notification saying "alerts are
+    # not reaching Slack" is itself an alert that will not reach Slack. The
+    # rendered PrometheusRule carries the full warning and the Alertmanager
+    # route that fixes it; NOTES.txt prints it at install time; the procedure is
+    # docs/src/how-to/alert-on-the-relay.md. This is not optional — the
+    # appearance of monitoring is what stops anybody checking by hand.
+    #
+    # ── Thresholds ──────────────────────────────────────────────────────────
+    # STARTING POINTS, NOT MEASUREMENTS. They were chosen for a
+    # homelab-to-small-cluster alert volume and you are expected to override
+    # them once you know what yours looks like. A tunable wrong number beats no
+    # rule; leaving them untouched for ever is the failure mode, not setting
+    # them at all.
+    #
+    # Tune outboxOldestAgeSeconds first. It is the primary delivery signal
+    # (ADR 001 D11) and the one most likely to be wrong for you: it is the
+    # answer to "how long may an alert sit undelivered before somebody should be
+    # woken up", and that is a question about your alerting, not about the relay.
+    thresholds:
+      # AlertthreadOutboxNotDraining. Seconds the oldest undelivered outbox row
+      # may wait. 300 assumes a channel that is nowhere near Slack's ~1
+      # post/second limit; a busy channel legitimately queues for longer.
+      outboxOldestAgeSeconds: 300
+      # AlertthreadOutboxBacklog. Operations queued before the backlog is
+      # considered unsustainable rather than a storm passing through.
+      outboxDepth: 500
+      # AlertthreadSlackCallsFailing. Fraction of Slack calls failing, 0-1.
+      slackCallErrorRatio: 0.1
+      # AlertthreadRateLimitedBySlack. Slack 429s per second, sustained.
+      slackRateLimitedPerSecond: 0.05
+
+    # Everything else in the rules — the `for:` windows, the severities, the
+    # `> 0` thresholds on dead letters and truncated alerts — ships as written.
+    # There is no lower threshold than "one" worth setting on an alert nobody
+    # was told about. To change one, set enabled: false here and apply your own
+    # PrometheusRule built from deploy/alertthread.rules.yaml.
+
+# ---------------------------------------------------------------------------
+# Scheduling and resources
+# ---------------------------------------------------------------------------
+
+# ADR 001 D1 budgets ~15-30 MB RSS for a ~6 MB static binary. There is no CPU
+# limit: the relay's work is bursty by nature — a storm arrives all at once —
+# and throttling the process that drains the outbox during exactly that burst is
+# the wrong trade for alerting infrastructure. The requests are what the
+# scheduler needs.
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+
+# Must outlast config.server.shutdown_grace, or Kubernetes SIGKILLs the relay
+# mid-delivery instead of letting it drain its leases.
+terminationGracePeriodSeconds: 30
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+priorityClassName: ""
+
+podAnnotations: {}
+podLabels: {}
+commonLabels: {}
+
+# A PodDisruptionBudget only makes sense with more than one replica, which means
+# PostgreSQL. On SQLite it would block a node drain for ever.
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+extraVolumes: []
+extraVolumeMounts: []

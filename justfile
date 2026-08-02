@@ -34,6 +34,9 @@ pg_target_dir := justfile_directory() / "target" / "llvm-cov-pg"
 # survivor lists back out of here to decide its own exit code.
 mutants_dir := justfile_directory() / "mutants.out"
 
+# The Helm chart. Phase 6 PR B publishes it as an OCI artifact from here.
+chart_dir := justfile_directory() / "charts" / "alertthread"
+
 # Policy, stated in ROADMAP.md; the gate script enforces it independently.
 ignore_regex := '(crates/app/src/main\.rs|dev/slack-mock/)'
 
@@ -225,6 +228,41 @@ check-rules: check-engine
         docker.io/prom/prometheus:v3.1.0 check rules /rules/alertthread.rules.yaml
 
 # ---------------------------------------------------------------------------
+# Helm chart
+# ---------------------------------------------------------------------------
+
+# Lint and template the Helm chart, and assert what it renders.
+#
+# Separate from `just ci` for the same reason `check-rules` is: it needs a tool
+# that is not part of a Rust toolchain. It has its own CI job and `just pre-push`
+# reaches it.
+#
+# The interesting half is scripts/chart-test.py, not `helm lint` — lint checks
+# that a chart is well-formed, which an empty PrometheusRule spec also is. The
+# assertions are what hold ROADMAP known open item 18's hardening in place.
+chart:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v helm >/dev/null 2>&1; then
+        echo "error: helm is not installed — https://helm.sh/docs/intro/install/" >&2
+        exit 1
+    fi
+    helm lint {{ chart_dir }} --strict \
+        --set config.slack.default_channel='#alerts' \
+        --set slack.existingSecret=alertthread-slack
+    ./scripts/chart-test.py
+
+# Copy deploy/alertthread.rules.yaml into the chart.
+#
+# Helm cannot read a file outside its own chart directory, so the chart carries a
+# copy and `just chart` fails when the two differ. deploy/ is the original; this
+# is the only supported way to update the copy.
+chart-sync:
+    cp {{ justfile_directory() }}/deploy/alertthread.rules.yaml \
+       {{ chart_dir }}/files/alertthread.rules.yaml
+    @echo "Synced the alert rules into {{ chart_dir }}/files/."
+
+# ---------------------------------------------------------------------------
 # Dev stack
 # ---------------------------------------------------------------------------
 
@@ -318,8 +356,8 @@ e2e: check-engine
 # ---------------------------------------------------------------------------
 
 # NOT all of CI. Three jobs need a container engine and are separate recipes —
-# `image`, `e2e` and `check-rules` — so that this one stays usable in a tight
-# loop. `just pre-push` is the full local equivalent.
+# `image`, `e2e` and `check-rules` — and a fourth needs helm, which is `chart`.
+# `just pre-push` is the full local equivalent.
 #
 # The fast half of CI: lint, tests + the coverage gate, docs, licences.
 ci: lint test docs
@@ -341,8 +379,9 @@ ci: lint test docs
 # 1.94 toolchain installed. Run those two by hand — `just up && just test-pg` —
 # when you touch the store or reach for a newer language feature.
 #
-# Everything CI runs that one machine can: `ci` plus the three container jobs.
-pre-push: check-engine check-rules ci image e2e
+# Everything CI runs that one machine can: `ci` plus the chart and the three
+# container jobs.
+pre-push: check-engine check-rules chart ci image e2e
     @echo
-    @echo "just pre-push: rules + ci + image + e2e all passed."
+    @echo "just pre-push: rules + chart + ci + image + e2e all passed."
     @echo "Not covered here: 'just test-pg' (needs 'just up') and the MSRV job."

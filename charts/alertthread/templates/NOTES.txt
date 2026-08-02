@@ -1,0 +1,95 @@
+alertthread {{ .Chart.AppVersion }} is installed as {{ include "alertthread.fullname" . }} in {{ .Release.Namespace }}.
+
+Backend  {{ .Values.config.storage.backend }}{{ if include "alertthread.isSqlite" . }} ({{ .Values.replicaCount }} replica, Recreate){{ else }} ({{ .Values.replicaCount }} replica(s), RollingUpdate){{ end }}
+Channel  {{ .Values.config.slack.default_channel }}
+Webhook  http://{{ include "alertthread.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}/webhook
+         POST {{ if .Values.webhookAuth.enabled }}requires Authorization: Bearer <token>{{ else }}is UNAUTHENTICATED{{ end }}
+
+1. POINT ALERTMANAGER AT IT
+
+   Two settings are mandatory and break correlation silently if they are wrong.
+   max_alerts must be 0, or alerts are truncated out of the body and their
+   resolutions arrive later as orphans. send_resolved must be true, or the relay
+   never learns about resolutions and every message stays red for ever.
+
+   receivers:
+     - name: alertthread
+       webhook_configs:
+         - url: http://{{ include "alertthread.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}/webhook?channel=%23alerts
+           send_resolved: true
+           max_alerts: 0
+{{- if .Values.webhookAuth.enabled }}
+           http_config:
+             authorization:
+               type: Bearer
+               credentials_file: /etc/alertmanager/secrets/{{ include "alertthread.webhookSecretName" . }}/{{ include "alertthread.webhookSecretKey" . }}
+
+   Alertmanager does not trim what it reads from credentials_file. A secret
+   written with a trailing newline sends a credential with a trailing newline,
+   the relay answers 401, and the alerts in that delivery are lost — it does not
+   retry a 401.
+{{- end }}
+
+{{ if .Values.metrics.prometheusRule.enabled }}2. ⚠️  ROUTE THE RELAY'S OWN ALERTS AWAY FROM THE RELAY
+
+   This release installed a PrometheusRule. Every rule in it describes a way
+   alertthread stops delivering to Slack, so routing those alerts through
+   alertthread means the notification saying "alerts are not reaching Slack" is
+   itself an alert that will not reach Slack.
+
+   Shipping the rules without a bypassing route is WORSE than shipping no rules:
+   the appearance of monitoring is what stops anybody checking by hand.
+
+   route:
+     routes:
+       # First, and it does not continue.
+       - matchers: [ 'alertname=~"Alertthread.*"' ]
+         receiver: slack-direct        # slack_configs, NOT this relay
+         continue: false
+
+   Full procedure: docs/src/how-to/alert-on-the-relay.md
+
+   The thresholds in those rules are starting points for a homelab-to-small-cluster
+   alert volume, not measurements. Tune them under
+   metrics.prometheusRule.thresholds; alertthread_outbox_oldest_age_seconds
+   (currently {{ .Values.metrics.prometheusRule.thresholds.outboxOldestAgeSeconds }}s) is the one to tune first.
+{{ else }}2. ⚠️  NOTHING IS ALERTING ON THIS RELAY
+
+   metrics.prometheusRule.enabled is false, so no rule watches whether alerts are
+   reaching Slack. alertthread_outbox_oldest_age_seconds is the metric that means
+   "alerts are not being delivered"; alert on it somewhere.
+{{ end }}
+3. CHECK IT
+
+   kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "alertthread.fullname" . }}
+   kubectl -n {{ .Release.Namespace }} port-forward deploy/{{ include "alertthread.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+   curl -s localhost:{{ .Values.service.port }}/readyz     # ready
+   curl -s localhost:{{ .Values.service.port }}/metrics | grep alertthread_slack_auth_valid
+
+   alertthread_slack_auth_valid 0 means Slack is not accepting the bot token.
+   The pod still runs: a transient failure starts degraded and the outbox keeps
+   accepting alerts, which is the point. A token Slack definitively rejects
+   refuses to start instead, and the pod logs why.
+
+   Alerts that were parked and never delivered come back with:
+
+   kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "alertthread.fullname" . }} -- \
+       /alertthread replay --config /etc/alertthread/config/config.yaml
+   kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "alertthread.fullname" . }} -- \
+       /alertthread replay --config /etc/alertthread/config/config.yaml --commit
+{{- if not .Values.slack.existingSecret }}
+
+4. ⚠️  THE BOT TOKEN CAME FROM YOUR VALUES
+
+   slack.token was set inline, so the token is in this release's stored values
+   and `helm get values {{ .Release.Name }}` prints it back. Put it in a Secret
+   and set slack.existingSecret instead; if it has already leaked, rotate it —
+   an exposed xoxb- token is burned, not fixable by editing history.
+{{- end }}
+{{- if and (include "alertthread.isSqlite" .) (not .Values.persistence.enabled) }}
+
+⚠️  persistence.enabled is false on SQLite, so the outbox and all correlation
+    state live in an emptyDir. Every restart discards alerts that were accepted
+    and not yet delivered, and every resolution afterwards arrives as an orphan.
+    This is a demo configuration, not a deployment.
+{{- end }}

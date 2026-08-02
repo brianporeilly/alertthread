@@ -1,0 +1,56 @@
+{{- if .Values.metrics.prometheusRule.enabled }}
+{{- /*
+The rules are `files/alertthread.rules.yaml`, embedded verbatim rather than
+retyped as template YAML. That file is a byte-for-byte copy of
+deploy/alertthread.rules.yaml — Helm cannot read outside a chart directory — and
+`just chart` fails if the two ever differ.
+
+Verbatim means the header comment travels into the rendered manifest, which is
+where the person running `helm template` reads it. The comment does not survive
+into the cluster object, so the same warning is repeated as an annotation and
+printed by NOTES.txt.
+
+Thresholds are substituted by exact-match anchor. Each anchor is asserted to
+occur exactly once in the rules file by scripts/chart-test.py, so an edit to the
+expression that silently stops the substitution matching fails the build instead
+of rendering the shipped default while values.yaml claims otherwise.
+*/ -}}
+{{- $t := .Values.metrics.prometheusRule.thresholds -}}
+{{- $rules := .Files.Get "files/alertthread.rules.yaml" -}}
+{{- $rules = $rules | replace "(alertthread_outbox_oldest_age_seconds) > 300" (printf "(alertthread_outbox_oldest_age_seconds) > %v" $t.outboxOldestAgeSeconds) -}}
+{{- $rules = $rules | replace "(alertthread_outbox_depth) > 500" (printf "(alertthread_outbox_depth) > %v" $t.outboxDepth) -}}
+{{- $rules = $rules | replace "rate(alertthread_slack_calls_total[15m])) > 0.1" (printf "rate(alertthread_slack_calls_total[15m])) > %v" $t.slackCallErrorRatio) -}}
+{{- $rules = $rules | replace "rate(alertthread_rate_limited_total{source=\"slack\"}[30m])) > 0.05" (printf "rate(alertthread_rate_limited_total{source=\"slack\"}[30m])) > %v" $t.slackRateLimitedPerSecond) -}}
+{{- /*
+`up{job="alertthread"}` is the one thing in the file that has to agree with how
+Prometheus labels the scrape. The ServiceMonitor's jobLabel reads
+app.kubernetes.io/name off the Service, so under nameOverride both move together.
+*/ -}}
+{{- $rules = $rules | replace "up{job=\"alertthread\"}" (printf "up{job=%q}" (include "alertthread.name" .)) -}}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "alertthread.fullname" . }}
+  labels:
+    {{- include "alertthread.labels" . | nindent 4 }}
+    {{- with .Values.metrics.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  annotations:
+    alertthread.dev/circular-dependency-warning: >-
+      THE RELAY CANNOT ALERT ON ITSELF THROUGH ITSELF. Every rule here describes a way
+      alertthread stops delivering to Slack, so an Alertmanager route that sends them to
+      alertthread means the notification saying "alerts are not reaching Slack" is itself an
+      alert that will not reach Slack. Route alertname=~"Alertthread.*" to a direct
+      slack_configs receiver first, with continue: false. Shipping these rules without that
+      route is worse than shipping no rules: it creates the appearance of monitoring where
+      there is none. See
+      https://github.com/brianporeilly/alertthread/blob/main/docs/src/how-to/alert-on-the-relay.md
+    alertthread.dev/thresholds: >-
+      The numeric thresholds in these expressions are starting points for a
+      homelab-to-small-cluster alert volume, not measurements. Override them under
+      metrics.prometheusRule.thresholds once you know your own volume;
+      alertthread_outbox_oldest_age_seconds is the one to tune first.
+spec:
+{{ regexReplaceAll "(?m)[ \t]+$" ($rules | indent 2) "" }}
+{{- end }}
