@@ -43,8 +43,8 @@ use sqlx::{Sqlite, SqliteConnection, SqlitePool};
 
 use crate::error::StoreError;
 use crate::model::{
-    AlertRecord, AlertState, ColumnDef, DeadLetter, Deferral, GroupMembership, GroupRecord,
-    LeasedOp, OpEffect, OpId, PruneStats, RetentionPolicy, StoreStats, WorkerId,
+    AlertRecord, AlertState, ColumnDef, DeadLetter, DeadLetterScope, Deferral, GroupMembership,
+    GroupRecord, LeasedOp, OpEffect, OpId, PruneStats, RetentionPolicy, StoreStats, WorkerId,
 };
 use crate::payload::{OpKind, StoredOp, channel_of, fingerprint_of, group_key_of};
 use crate::row::{
@@ -194,9 +194,16 @@ const MARK_ALERT_FAILED: &str = "\
 UPDATE alert_message SET state = 'failed'
 WHERE fingerprint = ? AND channel = ? AND state IN ('claimed', 'posted')";
 
+/// The two filters are bound as nullable parameters rather than appended to the string.
+/// `sqlx` 0.9's `SqlSafeStr` only accepts `&'static str`, and a query built by
+/// concatenation is the shape that footgun exists to prevent — so the statement carries
+/// every filter it can have and an unbound one matches everything.
 const SELECT_DEAD_LETTERS: &str = "\
-SELECT id, payload, attempts, last_error, created_at, dead_lettered_at
-FROM outbox WHERE dead_lettered_at IS NOT NULL
+SELECT id, channel, fingerprint, payload, attempts, last_error, created_at, dead_lettered_at
+FROM outbox
+WHERE dead_lettered_at IS NOT NULL
+  AND (? IS NULL OR channel = ?)
+  AND (? IS NULL OR fingerprint = ?)
 ORDER BY id LIMIT ?";
 
 /// The inverse of `DEAD_LETTER`. `attempts = 0` rather than a decrement: the op is being
@@ -206,6 +213,8 @@ UPDATE outbox
 SET dead_lettered_at = NULL, attempts = 0, next_attempt_at = ?,
     leased_by = NULL, leased_until = NULL
 WHERE dead_lettered_at IS NOT NULL
+  AND (? IS NULL OR channel = ?)
+  AND (? IS NULL OR fingerprint = ?)
 RETURNING channel, fingerprint";
 
 /// Undoes `MARK_ALERT_FAILED`, so the revived post can record a `message_ts` and the
@@ -830,20 +839,40 @@ impl StateStore for SqliteStore {
         Ok(())
     }
 
-    async fn dead_letters(&self, limit: u32) -> Result<Vec<DeadLetter>, StoreError> {
+    async fn dead_letters(
+        &self,
+        scope: &DeadLetterScope,
+        limit: u32,
+    ) -> Result<Vec<DeadLetter>, StoreError> {
+        let channel = scope.channel().map(ChannelId::as_str);
+        let fingerprint = scope.fingerprint().map(Fingerprint::as_str);
         let rows: Vec<DeadLetterRow> = sqlx::query_as(SELECT_DEAD_LETTERS)
+            .bind(channel)
+            .bind(channel)
+            .bind(fingerprint)
+            .bind(fingerprint)
             .bind(i64::from(limit))
             .fetch_all(&self.pool)
             .await?;
         dead_letters(rows)
     }
 
-    async fn revive_dead_letters(&self, now: DateTime<Utc>) -> Result<u64, StoreError> {
+    async fn revive_dead_letters(
+        &self,
+        scope: &DeadLetterScope,
+        now: DateTime<Utc>,
+    ) -> Result<u64, StoreError> {
         let now = stamp(now);
+        let channel = scope.channel().map(ChannelId::as_str);
+        let fingerprint = scope.fingerprint().map(Fingerprint::as_str);
         let mut txn = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
         let revived: Vec<(String, Option<String>)> = sqlx::query_as(REVIVE_DEAD_LETTERS)
             .bind(now)
+            .bind(channel)
+            .bind(channel)
+            .bind(fingerprint)
+            .bind(fingerprint)
             .fetch_all(&mut *txn)
             .await?;
 

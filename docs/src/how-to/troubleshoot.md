@@ -155,7 +155,7 @@ each one to what it means. The common ones:
 | `reason` | What happened | What to do |
 |---|---|---|
 | `invalid_auth` | The bot token is revoked, expired, or missing a scope | Replace it. Everything parked is revived automatically on the next successful probe |
-| `channel_unusable` | The bot is not in the channel, or the channel is archived | Invite the bot. **Nothing revives these automatically** (ROADMAP item 14) — the row survives and can be replayed by hand |
+| `channel_unusable` | The bot is not in the channel, or the channel is archived | Invite the bot, then **replay by hand** — see below. Nothing revives these automatically, because no probe watches channel membership |
 | `bad_request` | Slack rejected the message itself — `msg_too_long`, `invalid_blocks`, `no_text` | Almost always a template override producing something enormous or malformed. The verbatim Slack code is in the log line and in the row's `last_error` |
 | `slack_unavailable`, `transport`, `http_status` | Retries ran out while Slack was unreachable | The outbox tried ten times over ~30 minutes. Check egress; consider `worker.max_attempts` if your Slack is routinely unavailable for longer |
 | `alert_row_missing` | The correlation row was gone when the operation ran | Should not happen; the pruner refuses to delete rows with queued work. Worth an issue |
@@ -168,6 +168,51 @@ open-ended and never become label values; they are in the log line and in the pa
 `alertthread_outbox_dead_lettered` is the count of rows still parked. It stays where it is
 until something clears them, which makes it the better dashboard panel of the two: the counter
 tells you it happened, the gauge tells you it is still true.
+
+## Alerts are still parked after you fixed the cause
+
+Replacing a bot token revives everything parked on its own: the auth probe sees the token go
+from rejected to accepted and that is the event which says the reason has gone.
+
+**Nothing else does.** `channel_unusable` is the case you will meet: you invite the bot to the
+channel, every future alert lands, and every alert parked before that stays parked, because no
+probe watches channel membership the way the auth probe watches the token.
+
+Fix it with `alertthread replay`, which is a subcommand of the binary already in the image.
+
+```bash
+# 1. Look. This changes nothing.
+kubectl -n observability exec deploy/alertthread -- \
+    alertthread replay --channel '#alerts'
+
+# 2. Re-queue what you just read.
+kubectl -n observability exec deploy/alertthread -- \
+    alertthread replay --channel '#alerts' --commit
+```
+
+Step 1 is not optional politeness — these operations post to Slack when they go out, and the
+listing is how you find out what a `--commit` is about to send. Scope it with `--channel`,
+`--fingerprint`, or both; with neither it takes every parked operation in the store.
+
+The full option list is in [Command line](../reference/cli.md).
+
+**`replay` re-queues; it does not deliver.** The rows go back into the outbox and the relay's
+worker sends them, which is why you do not have to stop the relay to run this — and why
+nothing goes out if there is no relay running against the store. Confirm delivery with the
+queue, not with the command's output:
+
+```bash
+curl -s localhost:8080/metrics | grep -E 'outbox_depth|dead_lettered'
+```
+
+`alertthread_outbox_dead_lettered` falls immediately; `alertthread_outbox_depth` rises and then
+drains at one message per second per channel. `alertthread_dead_letter_revived_total` does
+**not** move — that counter belongs to the relay's automatic sweep, and `replay` is a separate
+process (ROADMAP known open item 19).
+
+If the operations park again with the same reason, the cause is not fixed. Read the new
+`last_error`: an invite that went to the wrong channel, or a private channel the bot needs
+`groups:write` for, both come back as `channel_not_found`.
 
 ## Alerts arrived, but as fifteen separate messages
 

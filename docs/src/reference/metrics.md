@@ -109,6 +109,12 @@ one Slack call on an event that only happens when a human has just fixed somethi
 is the direction this project errs in: the cost of not reviving a row that should have been
 is an alert nobody hears about.
 
+**A row parked for a reason the token never had anything to do with is recovered by hand**,
+with [`alertthread replay`](cli.md). That path does *not* move
+`alertthread_dead_letter_revived_total`: the counter lives in the relay's registry and the
+subcommand is a separate process, so after a replay `alertthread_outbox_dead_lettered` falls
+with nothing accounting for the drop. ROADMAP known open item 19.
+
 ### `source` on `alertthread_rate_limited_total`
 
 **Not in [ADR 001 D11](../adr/001-adr.md)**, which lists `{method}` alone. It is here because

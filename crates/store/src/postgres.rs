@@ -32,8 +32,8 @@ use sqlx::{PgConnection, PgPool, Postgres};
 
 use crate::error::StoreError;
 use crate::model::{
-    AlertRecord, AlertState, ColumnDef, DeadLetter, Deferral, GroupMembership, GroupRecord,
-    LeasedOp, OpEffect, OpId, PruneStats, RetentionPolicy, StoreStats, WorkerId,
+    AlertRecord, AlertState, ColumnDef, DeadLetter, DeadLetterScope, Deferral, GroupMembership,
+    GroupRecord, LeasedOp, OpEffect, OpId, PruneStats, RetentionPolicy, StoreStats, WorkerId,
 };
 use crate::payload::{OpKind, StoredOp, channel_of, fingerprint_of, group_key_of};
 use crate::row::{
@@ -176,10 +176,19 @@ const MARK_ALERT_FAILED: &str = "\
 UPDATE alert_message SET state = 'failed'
 WHERE fingerprint = $1 AND channel = $2 AND state IN ('claimed', 'posted')";
 
+/// The two filters are bound as nullable parameters rather than appended to the string.
+/// `sqlx` 0.9's `SqlSafeStr` only accepts `&'static str`, and a query built by
+/// concatenation is the shape that footgun exists to prevent — so the statement carries
+/// every filter it can have and an unbound one matches everything. The `::text` casts are
+/// not decoration: without them PostgreSQL cannot infer the type of a parameter whose only
+/// other use is `IS NULL`.
 const SELECT_DEAD_LETTERS: &str = "\
-SELECT id, payload, attempts, last_error, created_at, dead_lettered_at
-FROM outbox WHERE dead_lettered_at IS NOT NULL
-ORDER BY id LIMIT $1";
+SELECT id, channel, fingerprint, payload, attempts, last_error, created_at, dead_lettered_at
+FROM outbox
+WHERE dead_lettered_at IS NOT NULL
+  AND ($1::text IS NULL OR channel = $1)
+  AND ($2::text IS NULL OR fingerprint = $2)
+ORDER BY id LIMIT $3";
 
 /// The inverse of `DEAD_LETTER`. `attempts = 0` rather than a decrement: the op is being
 /// given a fresh budget because the condition that exhausted the old one is believed fixed.
@@ -188,6 +197,8 @@ UPDATE outbox
 SET dead_lettered_at = NULL, attempts = 0, next_attempt_at = $1,
     leased_by = NULL, leased_until = NULL
 WHERE dead_lettered_at IS NOT NULL
+  AND ($2::text IS NULL OR channel = $2)
+  AND ($3::text IS NULL OR fingerprint = $3)
 RETURNING channel, fingerprint";
 
 /// Undoes `MARK_ALERT_FAILED`, so the revived post can record a `message_ts` and the
@@ -726,20 +737,32 @@ impl StateStore for PostgresStore {
         Ok(())
     }
 
-    async fn dead_letters(&self, limit: u32) -> Result<Vec<DeadLetter>, StoreError> {
+    async fn dead_letters(
+        &self,
+        scope: &DeadLetterScope,
+        limit: u32,
+    ) -> Result<Vec<DeadLetter>, StoreError> {
         let rows: Vec<DeadLetterRow> = sqlx::query_as(SELECT_DEAD_LETTERS)
+            .bind(scope.channel().map(ChannelId::as_str))
+            .bind(scope.fingerprint().map(Fingerprint::as_str))
             .bind(i64::from(limit))
             .fetch_all(&self.pool)
             .await?;
         dead_letters(rows)
     }
 
-    async fn revive_dead_letters(&self, now: DateTime<Utc>) -> Result<u64, StoreError> {
+    async fn revive_dead_letters(
+        &self,
+        scope: &DeadLetterScope,
+        now: DateTime<Utc>,
+    ) -> Result<u64, StoreError> {
         let now = stamp(now);
         let mut txn = self.pool.begin().await?;
 
         let revived: Vec<(String, Option<String>)> = sqlx::query_as(REVIVE_DEAD_LETTERS)
             .bind(now)
+            .bind(scope.channel().map(ChannelId::as_str))
+            .bind(scope.fingerprint().map(Fingerprint::as_str))
             .fetch_all(&mut *txn)
             .await?;
 

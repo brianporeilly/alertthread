@@ -17,6 +17,7 @@
 # Reference
 
 - [Configuration](reference/configuration.md)
+- [Command line](reference/cli.md)
 - [HTTP API](reference/http-api.md)
 - [Slack errors](reference/slack-errors.md)
 - [Metrics](reference/metrics.md)

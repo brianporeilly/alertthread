@@ -42,7 +42,7 @@ use alertthread::shutdown::cancellation;
 use alertthread::worker::{auth_probe_loop, dead_letter_loop};
 use alertthread_core::{AlertBatch, ChannelId, Fingerprint, Policy, WebhookPayload, plan};
 use alertthread_slack::{SlackClient, SlackToken};
-use alertthread_store::{AlertState, StateStore, WorkerId};
+use alertthread_store::{AlertState, DeadLetterScope, StateStore, WorkerId};
 use chrono::{TimeDelta, Utc};
 use figment::Figment;
 use figment::providers::{Format, Serialized, Yaml};
@@ -280,7 +280,11 @@ async fn an_alert_parked_by_a_bad_token_is_readable_with_the_reason_it_was_parke
 
     relay.assert_metric("alertthread_dead_letter_total{reason=\"invalid_auth\"} 1");
 
-    let parked = relay.store.dead_letters(100).await.expect("listing");
+    let parked = relay
+        .store
+        .dead_letters(&DeadLetterScope::ALL, 100)
+        .await
+        .expect("listing");
     assert_eq!(parked.len(), 1);
     assert!(
         parked[0]
@@ -361,7 +365,7 @@ async fn a_token_that_starts_working_again_returns_the_alerts_it_cost() {
         loop {
             if relay
                 .store
-                .dead_letters(100)
+                .dead_letters(&DeadLetterScope::ALL, 100)
                 .await
                 .expect("listing")
                 .is_empty()
@@ -452,7 +456,12 @@ async fn a_healthy_prober_does_not_keep_reviving_the_dead_letter_queue() {
     probing.await.expect("the prober stops");
 
     assert_eq!(
-        relay.store.dead_letters(100).await.expect("listing").len(),
+        relay
+            .store
+            .dead_letters(&DeadLetterScope::ALL, 100)
+            .await
+            .expect("listing")
+            .len(),
         1,
         "the token never stopped working, so nothing was recovered"
     );
