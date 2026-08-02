@@ -403,6 +403,27 @@ def test_probes(chart: Path) -> None:
         f"{grace_seconds}s: a transient Slack outage would be served as CrashLoopBackOff",
     )
 
+    # The relay reads `ALERTTHREAD_`-prefixed environment with `__` between nested keys, and an
+    # unrecognised key is fatal at startup by design. A bare ALERTTHREAD_<WORD> therefore parses
+    # as a top-level setting that does not exist, and ALERTTHREAD_CONFIG, ALERTTHREAD_LOG and
+    # ALERTTHREAD_LOG_FORMAT are all documented names that hit it — the config path has to be the
+    # positional argument instead. ROADMAP known open item 22.
+    for scenario in ([], ["--set", "config.storage.backend=postgres", "--set", "postgres.existingSecret=pg"]):
+        container = one(render(chart, *scenario), "Deployment")["spec"]["template"]["spec"][
+            "containers"
+        ][0]
+        for entry in container.get("env", []):
+            name = entry["name"]
+            check(
+                not (name.startswith("ALERTTHREAD_") and "__" not in name),
+                f"{name} is a bare ALERTTHREAD_<WORD> variable: the relay reads it as a "
+                f"top-level config key, does not find one, and refuses to start",
+            )
+        check(
+            container.get("args") == ["/etc/alertthread/config/config.yaml"],
+            "the config file is not passed as the positional argument",
+        )
+
     grace_value = values["config"]["server"]["shutdown_grace"]
     match = re.fullmatch(r"(\d+)(ms|s|m|h|d)?", str(grace_value))
     shutdown = int(match.group(1)) * seconds.get(match.group(2) or "s", 1) if match else 0

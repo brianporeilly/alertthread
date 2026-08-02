@@ -73,8 +73,10 @@ Webhook  http://{{ include "alertthread.fullname" . }}.{{ .Release.Namespace }}.
 
    Alerts that were parked and never delivered come back with:
 
-   kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "alertthread.fullname" . }} -- /alertthread replay
-   kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "alertthread.fullname" . }} -- /alertthread replay --commit
+   kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "alertthread.fullname" . }} -- \
+       /alertthread replay --config /etc/alertthread/config/config.yaml
+   kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "alertthread.fullname" . }} -- \
+       /alertthread replay --config /etc/alertthread/config/config.yaml --commit
 {{- if not .Values.slack.existingSecret }}
 
 4. ⚠️  THE BOT TOKEN CAME FROM YOUR VALUES

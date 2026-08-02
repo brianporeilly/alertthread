@@ -192,15 +192,23 @@ its built-in kept, so a broken template degrades rather than stopping the relay 
 
 ## Recover a parked alert
 
-The binary is in the image and the chart sets `ALERTTHREAD_CONFIG`, so
-[`alertthread replay`](../reference/cli.md) needs no arguments:
+The binary is in the image, so [`alertthread replay`](../reference/cli.md) is a `kubectl exec`
+away. Pass the chart's config file explicitly:
 
 ```bash
-kubectl -n observability exec deploy/alertthread -- /alertthread replay
-kubectl -n observability exec deploy/alertthread -- /alertthread replay --commit
+kubectl -n observability exec deploy/alertthread -- \
+    /alertthread replay --config /etc/alertthread/config/config.yaml
+kubectl -n observability exec deploy/alertthread -- \
+    /alertthread replay --config /etc/alertthread/config/config.yaml --commit
 ```
 
 It is a dry run without `--commit`, and it is safe against a live relay.
+
+`--config` rather than the `ALERTTHREAD_CONFIG` environment variable, which the chart
+deliberately does not set: setting it makes the relay refuse to start (ROADMAP known open item
+22). The same applies to `ALERTTHREAD_LOG` and `ALERTTHREAD_LOG_FORMAT` — do not put any bare
+`ALERTTHREAD_<WORD>` variable in `env` or `extraEnv`. Nested names such as
+`ALERTTHREAD_STORAGE__URL` are unaffected.
 
 ## Why the CRDs are not optional
 

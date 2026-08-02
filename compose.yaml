@@ -141,6 +141,10 @@ services:
       # this in `http_config.authorization` — see dev/alertmanager/alertmanager.yml.
       # A demo credential in a demo stack; nothing here is a secret.
       ALERTTHREAD_SERVER__AUTH_TOKEN: "demo-webhook-token-not-a-secret"
+      # Inert: the relay reads ALERTTHREAD_LOG, not RUST_LOG — and setting
+      # ALERTTHREAD_LOG makes it refuse to start (ROADMAP known open item 22).
+      # Left in place rather than removed so the next person does not add it
+      # back; the relay logs at its default level here.
       RUST_LOG: "info,alertthread=debug"
     ports:
       - "8080:8080"

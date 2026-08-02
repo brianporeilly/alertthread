@@ -72,11 +72,16 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
+          # The positional argument, not ALERTTHREAD_CONFIG. Setting that
+          # variable makes the relay refuse to start — figment's `ALERTTHREAD_`
+          # provider reads it as a top-level key named `config`, which is not
+          # one, and unknown keys are fatal. ROADMAP known open item 22. The same
+          # trap catches ALERTTHREAD_LOG and ALERTTHREAD_LOG_FORMAT, so the chart
+          # sets no bare ALERTTHREAD_<WORD> variable at all and a test asserts it.
+          args:
+            - /etc/alertthread/config/config.yaml
+          {{- if or .Values.postgres.existingSecret .Values.env .Values.extraEnv }}
           env:
-            # Also picked up by `alertthread replay`, so a `kubectl exec` into
-            # this pod needs no --config.
-            - name: ALERTTHREAD_CONFIG
-              value: /etc/alertthread/config/config.yaml
             {{- if .Values.postgres.existingSecret }}
             # Environment beats the config file, which is why the connection
             # string — the one storage setting carrying a password — arrives
@@ -96,6 +101,7 @@ spec:
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+          {{- end }}
           ports:
             - name: http
               containerPort: {{ (splitList ":" .Values.config.server.listen) | last | int }}

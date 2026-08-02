@@ -155,16 +155,23 @@ templates:
   group_summary: ""
   thread_reply: ""
 
-# Extra environment for the relay container. ALERTTHREAD_LOG and
-# ALERTTHREAD_LOG_FORMAT have no config-file equivalent — logging has to be
-# configurable before the config file is read — so they live here.
-env:
-  ALERTTHREAD_LOG: info,alertthread=info
-  # Set to `json` for structured output.
-  ALERTTHREAD_LOG_FORMAT: ""
+# Extra environment for the relay container, as name: value.
+#
+# ⚠️ Do not set a bare `ALERTTHREAD_<WORD>` variable here. The relay reads its
+# environment with the prefix `ALERTTHREAD_` and `__` between nested keys, and
+# an unrecognised key is fatal at startup by design — so `ALERTTHREAD_CONFIG`,
+# `ALERTTHREAD_LOG` and `ALERTTHREAD_LOG_FORMAT` each parse as a top-level
+# setting that does not exist and the relay refuses to start. That is ROADMAP
+# known open item 22, it is a relay bug rather than a chart one, and until it is
+# fixed there is no working way to set the log filter. A chart test asserts none
+# is set, so this cannot be reintroduced by accident.
+#
+# Nested names are fine: `ALERTTHREAD_STORAGE__URL` and the like work, and are
+# how the chart passes the PostgreSQL connection string.
+env: {}
 
 # Raw entries appended to the container's env, for a valueFrom you need and this
-# chart does not model.
+# chart does not model. The same warning applies.
 extraEnv: []
 
 # ---------------------------------------------------------------------------

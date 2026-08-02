@@ -681,6 +681,38 @@ a `/still-firing` slash command.
     behaviour in a release PR, and a change that can refuse to start belongs with tests for
     every way it can be wrong.
 
+22. **Every documented bare `ALERTTHREAD_*` environment variable makes the relay refuse to
+    start.** Found by booting the relay against the ConfigMap the chart renders, which is a
+    thing nothing had done before.
+
+    `Config::figment` merges `Env::prefixed("ALERTTHREAD_").split("__")`, and `Config` denies
+    unknown fields — deliberately, because a misspelled key is a setting an operator believes
+    is in effect. A name with no `__` in it therefore parses as a *top-level* key:
+
+    | Variable | Parses as | Result |
+    |---|---|---|
+    | `ALERTTHREAD_CONFIG` | `config` | refuses to start |
+    | `ALERTTHREAD_LOG` | `log` | refuses to start |
+    | `ALERTTHREAD_LOG_FORMAT` | `log_format` | refuses to start |
+
+    All three are documented in `reference/configuration.md`, and `run::config_path` reads
+    `ALERTTHREAD_CONFIG` — the code that consumes it is correct and never runs, because the
+    figment layer rejects the variable first. Nested names are unaffected:
+    `ALERTTHREAD_STORAGE__URL` works, which is why nothing noticed.
+
+    Two consequences beyond the obvious. **There is currently no way to set the log filter at
+    all**: `ALERTTHREAD_LOG` refuses to start and `RUST_LOG` is not read — `init_tracing` only
+    ever asks for `ALERTTHREAD_LOG`. `compose.yaml` sets `RUST_LOG` on the relay and it has
+    been inert since Phase 4. And the demo stack never hit the startup failure because it
+    configures the relay entirely through nested names.
+
+    Worked around in Phase 6 PR A rather than fixed: the chart passes the config file as the
+    positional argument, sets no bare `ALERTTHREAD_<WORD>` variable, and a chart test asserts
+    it stays that way. **The fix is relay-side and wants its own PR** — the shape is to skip
+    the three reserved names in the `Env` provider, with a test per name asserting the relay
+    starts with it set, plus one asserting a genuinely unknown key is still fatal, because
+    that fatality is a decision and not an accident.
+
 ## Process notes worth keeping
 
 - **A gate nobody has watched reject something is not a gate.** Phase 0 proved the coverage
