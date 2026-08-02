@@ -8,6 +8,7 @@
 
 # How-to guides
 
+- [Install with Helm](how-to/install-with-helm.md)
 - [Enable HA with PostgreSQL](how-to/enable-ha-postgres.md)
 - [Customize message templates](how-to/customize-templates.md)
 - [Harden a deployment](how-to/harden-a-deployment.md)

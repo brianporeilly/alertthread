@@ -1,0 +1,16 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+{{- if include "alertthread.isSqlite" . }}
+{{- fail "podDisruptionBudget.enabled needs config.storage.backend=postgres: with one SQLite replica a PDB blocks node drains indefinitely" }}
+{{- end }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "alertthread.fullname" . }}
+  labels:
+    {{- include "alertthread.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "alertthread.selectorLabels" . | nindent 6 }}
+{{- end }}
