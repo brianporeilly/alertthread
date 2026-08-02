@@ -165,6 +165,12 @@ conformance!(
     reviving_a_parked_post_lets_its_resolution_correlate_again,
     reviving_leaves_a_resolved_alert_resolved,
     reviving_takes_the_whole_queue_and_leaves_live_work_alone,
+    // Scoped recovery — what `alertthread replay` narrows to (ADR 003 §5.2).
+    a_parked_storm_summary_reports_no_fingerprint,
+    a_scoped_listing_shows_only_the_rows_a_scoped_replay_would_take,
+    reviving_one_channel_leaves_the_other_channels_parked,
+    reviving_one_fingerprint_takes_that_alert_and_nothing_else,
+    a_scope_matching_nothing_changes_nothing,
     the_lease_honours_its_limit_and_takes_the_oldest_work_first,
     a_lease_hands_out_its_batch_oldest_first,
     lease_ordering_survives_variable_sub_second_precision,

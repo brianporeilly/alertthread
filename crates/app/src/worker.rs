@@ -40,7 +40,8 @@ use std::sync::Arc;
 use alertthread_core::{ChannelId, Op};
 use alertthread_slack::{Renderer, SlackClient};
 use alertthread_store::{
-    DeadLetter, Deferral, LeasedOp, OpId, RetentionPolicy, StateStore, StoreError, WorkerId,
+    DeadLetter, DeadLetterScope, Deferral, LeasedOp, OpId, RetentionPolicy, StateStore, StoreError,
+    WorkerId,
 };
 use chrono::{DateTime, TimeDelta, Utc};
 
@@ -450,7 +451,7 @@ pub async fn auth_probe_loop<S: StateStore>(
 /// happens when a human has just fixed something. The cost of the precise version being
 /// wrong is an alert nobody hears about.
 async fn revive_dead_letters<S: StateStore>(store: &S, metrics: &Metrics, now: DateTime<Utc>) {
-    match store.revive_dead_letters(now).await {
+    match store.revive_dead_letters(&DeadLetterScope::ALL, now).await {
         Ok(0) => {}
         Ok(count) => {
             metrics.dead_letters_revived(count);
@@ -485,7 +486,10 @@ pub async fn dead_letter_loop<S: StateStore>(
 ) {
     let mut reported = HashSet::new();
     while !shutdown.is_cancelled() {
-        match store.dead_letters(DEAD_LETTER_REPORT_LIMIT).await {
+        match store
+            .dead_letters(&DeadLetterScope::ALL, DEAD_LETTER_REPORT_LIMIT)
+            .await
+        {
             Ok(parked) => {
                 report_dead_letters(&parked, &mut reported);
             }
@@ -706,6 +710,8 @@ mod tests {
                 channel: channel(),
                 placement: Placement::Channel,
             },
+            channel: channel(),
+            fingerprint: Some(Fingerprint::new(format!("f{id}"))),
             attempts: 10,
             last_error: Some("chat.postMessage: invalid_auth".to_owned()),
             created_at: chrono::DateTime::from_timestamp(1_000, 0).expect("in range"),

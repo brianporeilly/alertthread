@@ -3,7 +3,9 @@
 ## Inbound
 
 `alertthread` exposes four endpoints and nothing else. There is no admin API and no
-management port.
+management port: the one operation that would have wanted one, replaying a parked alert, is a
+subcommand of the binary instead — [`alertthread replay`](cli.md), decided in
+[ADR 003 §5.2](../adr/003-hardening-divergences.md).
 
 | Method | Path | Purpose | Authenticated |
 |---|---|---|---|

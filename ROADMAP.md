@@ -168,7 +168,9 @@ memory — check before assuming an API.
 concession. Timestamps cross the core→store boundary constantly, and `sqlx` has
 first-class `chrono` support; using `jiff` in the core would mean converting at every
 store call — two time types in one codebase is a reliable source of off-by-a-timezone
-bugs. Revisit if `sqlx` gains native `jiff` support.
+bugs. Revisit if `sqlx` gains native `jiff` support, **or if `chrono` draws a RUSTSEC advisory
+or is archived** — `chrono` is soft-deprecated upstream and its maintainer recommends `jiff`.
+Known open item 19 carries both triggers and the reason neither has fired.
 
 ---
 
@@ -514,21 +516,24 @@ a `/still-firing` slash command.
     **Revisit if** a deployment ever accumulates enough permanently-unusable rows for that churn
     to matter. That condition survives the acceptance; it is the only thing that would reopen it.
 
-14. **Nothing revives a dead letter parked for a non-auth reason — `alertthread replay` is
-    decided and not yet built.** `channel_unusable` is the case that will come up: an operator
-    invites the bot to the channel and the alerts parked before that stay parked, because no
-    probe watches channel membership the way the auth prober watches the token. The row and its
-    payload survive, so recovery is possible by hand; there is no supported command for it.
+14. ~~**Nothing revives a dead letter parked for a non-auth reason — `alertthread replay` is
+    decided and not yet built.**~~ **Built.** The shape is the one
+    [ADR 003 §5.2](docs/src/adr/003-hardening-divergences.md) decided: a binary subcommand, not
+    an `/admin` HTTP endpoint. It is a dry run unless `--commit` is passed, and it scopes by
+    `--channel` and `--fingerprint`.
 
-    **Decided in review and recorded in
-    [ADR 003 §5.2](docs/src/adr/003-hardening-divergences.md): a binary subcommand,
-    `alertthread replay`, not an `/admin` HTTP endpoint.** No new authenticated mutating HTTP
-    surface on the server that accepts webhooks; it works on the `scratch` image via `kubectl
-    exec` because the binary is already there, with the cluster's own RBAC as the authorization
-    decision; and the operator running it has just fixed something by hand and is already at a
-    shell.
+    Those two axes are the low-cardinality columns `outbox` already carries. Scoping by *park
+    reason* — the obvious third axis — was considered and rejected here: the reason is not
+    persisted per row, so it would have cost a migration and a `dead_letter` signature change
+    to narrow an operation whose cost is already bounded and self-correcting (§5.1). Channel is
+    the axis the motivating `channel_unusable` case actually needs.
 
-    **Still open: the implementation.** It gets its own PR. Do not re-argue the shape.
+    `revive_dead_letters` gained a `DeadLetterScope` rather than a second method. The automatic
+    prober sweep passes `DeadLetterScope::ALL` and so stays all-or-nothing exactly as §5.1
+    describes; the narrower scope exists only for the human at the shell. Revival hands rows
+    back to `lease_batch` rather than delivering anything itself, which is what makes it safe
+    to run against a live relay: a revived row is picked up by whichever worker leases it next,
+    under the same exactly-once claim as any other queued op.
 
 15. ~~**`just pre-push` still does not cover the `test-pg` or MSRV jobs.**~~ **Accepted as
     documented in the Phase 5 closeout: the two jobs are CI's alone, and there is no
@@ -571,6 +576,33 @@ a `/still-firing` slash command.
     measurement — `alertthread_outbox_oldest_age_seconds > 300` most of all. Same status as
     item 1's `collapse_threshold`: revisit against real volume, and say so in the file, which it
     does.
+
+19. **`chrono` is soft-deprecated, and the revisit trigger written for it is now too narrow.**
+    [chronotope/chrono#1768](https://github.com/chronotope/chrono/issues/1768), open since
+    January 2026: the lead maintainer intends to wind down `chrono` and `chrono-tz`, calls the
+    API dated, and explicitly recommends `jiff` — the crate this project already called "the
+    better-designed library" when it chose against it. No timeline, no archival, and handover to
+    a credible maintainer is left open.
+
+    **Nothing to do yet, and the reason is unchanged.** `sqlx` 0.9 ships `chrono` and `time`
+    features and has no `jiff` feature — verified against the vendored manifest, not from
+    memory. Migrating before that exists reinstates conversion at every store call, which is
+    precisely the two-time-types-in-one-codebase hazard the original decision avoided. The
+    deprecation does not change that mechanic.
+
+    **What changes is that there are now two triggers, either sufficient**, where the settled
+    decisions table records only the first:
+
+    1. `sqlx` gains native `jiff` support — the original trigger, and the one that makes the
+       migration cheap.
+    2. `chrono` draws a RUSTSEC advisory or is archived — the one that makes it urgent.
+       `cargo-deny` is already a CI job, so this arrives as a hard build failure rather than as
+       a discussion. That tripwire is wired; it does not need building.
+
+    Scale, for whoever picks this up: 65 `chrono` references across 36 files, concentrated in
+    `core` — which is at 100% coverage and mutation-gated, so this churns the crate holding
+    every correctness decision for no user-visible benefit. Revisit **after** v0.1.0, not
+    during it.
 
 ## Process notes worth keeping
 

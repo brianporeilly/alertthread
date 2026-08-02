@@ -35,7 +35,8 @@ use alertthread_core::{
     Plan, Policy, ResolveTarget, ThreadTs, WebhookAlert, plan,
 };
 use alertthread_store::{
-    AlertState, Deferral, LeasedOp, OpEffect, RetentionPolicy, StateStore, StoreError, WorkerId,
+    AlertState, DeadLetterScope, Deferral, LeasedOp, OpEffect, RetentionPolicy, StateStore,
+    StoreError, WorkerId,
 };
 use chrono::{DateTime, TimeDelta, Utc};
 
@@ -1381,7 +1382,10 @@ pub(crate) async fn a_parked_row_can_be_read_back_with_everything_needed_to_diag
         .await
         .expect("dead-lettering a leased op");
 
-    let parked = store.dead_letters(100).await.expect("listing parked rows");
+    let parked = store
+        .dead_letters(&DeadLetterScope::ALL, 100)
+        .await
+        .expect("listing parked rows");
     assert_eq!(parked.len(), 1);
     assert_eq!(parked[0].id, leased[0].id);
     assert_eq!(parked[0].op, leased[0].op, "the payload is the evidence");
@@ -1396,6 +1400,231 @@ pub(crate) async fn a_parked_row_can_be_read_back_with_everything_needed_to_diag
         parked[0].dead_lettered_at,
         t0() + secs(10),
         "and when it was given up on"
+    );
+    // Read from the columns, not from inside the payload: these are what
+    // `DeadLetterScope` filters on, so a listing that reported them from somewhere else
+    // could show one thing and act on another.
+    assert_eq!(parked[0].channel, channel(), "where it was going");
+    assert_eq!(
+        parked[0].fingerprint,
+        Some(Fingerprint::new("abc")),
+        "and which alert it was"
+    );
+}
+
+pub(crate) async fn a_parked_storm_summary_reports_no_fingerprint<S: StateStore>(store: &S) {
+    // A storm-collapse parent belongs to a group, not to an alert, and `outbox.fingerprint`
+    // is NULL for it. That is why a fingerprint-scoped replay must not sweep it up.
+    ingest(
+        store,
+        &batch((0..6).map(|i| firing(&format!("f{i}"))).collect()),
+        t0(),
+    )
+    .await;
+    let leased = lease(store, "w1", t0()).await;
+    let group_op = leased
+        .iter()
+        .find(|op| matches!(op.op, Op::PostGroup { .. }))
+        .expect("six alerts collapse into a summary");
+    store
+        .dead_letter(group_op.id, "channel_unusable", t0() + secs(10))
+        .await
+        .expect("dead-lettering the summary");
+
+    let parked = store
+        .dead_letters(&DeadLetterScope::ALL, 100)
+        .await
+        .expect("listing");
+    assert_eq!(parked.len(), 1);
+    assert_eq!(parked[0].channel, channel());
+    assert_eq!(parked[0].fingerprint, None);
+
+    let scoped = DeadLetterScope::ALL.with_fingerprint(Fingerprint::new("f0"));
+    assert!(
+        store
+            .dead_letters(&scoped, 100)
+            .await
+            .expect("listing")
+            .is_empty(),
+        "a group summary has no fingerprint and must not match one"
+    );
+    assert_eq!(
+        store
+            .revive_dead_letters(&scoped, t0() + secs(600))
+            .await
+            .expect("reviving"),
+        0
+    );
+}
+
+pub(crate) async fn a_scoped_listing_shows_only_the_rows_a_scoped_replay_would_take<
+    S: StateStore,
+>(
+    store: &S,
+) {
+    // The dry run and the commit have to agree, and the only thing that makes them agree is
+    // that both are the same predicate over the same two columns.
+    ingest(store, &batch_in(CHANNEL, GROUP, vec![firing("a")]), t0()).await;
+    ingest(
+        store,
+        &batch_in(OTHER_CHANNEL, OTHER_GROUP, vec![firing("b")]),
+        t0() + secs(1),
+    )
+    .await;
+    ingest(
+        store,
+        &batch_in(OTHER_CHANNEL, OTHER_GROUP, vec![firing("c")]),
+        t0() + secs(2),
+    )
+    .await;
+    for op in lease(store, "w1", t0() + secs(10)).await {
+        store
+            .dead_letter(op.id, "channel_unusable", t0() + secs(20))
+            .await
+            .expect("dead-lettering");
+    }
+
+    let scope = DeadLetterScope::ALL.with_channel(ChannelId::new(OTHER_CHANNEL));
+    let listed = store.dead_letters(&scope, 100).await.expect("listing");
+    assert_eq!(listed.len(), 2, "{listed:?}");
+    assert!(
+        listed
+            .iter()
+            .all(|row| row.channel == ChannelId::new(OTHER_CHANNEL))
+    );
+
+    assert_eq!(
+        store
+            .revive_dead_letters(&scope, t0() + secs(30))
+            .await
+            .expect("reviving"),
+        u64::try_from(listed.len()).expect("two rows"),
+        "the commit takes exactly what the dry run listed"
+    );
+}
+
+pub(crate) async fn reviving_one_channel_leaves_the_other_channels_parked<S: StateStore>(
+    store: &S,
+) {
+    // The motivating case for `alertthread replay`: somebody has just invited the bot to one
+    // channel. Nothing about that says the alerts parked for a *different* channel are
+    // deliverable now, and re-sending them would spend a Slack call to re-park each one.
+    ingest(store, &batch_in(CHANNEL, GROUP, vec![firing("a")]), t0()).await;
+    ingest(
+        store,
+        &batch_in(OTHER_CHANNEL, OTHER_GROUP, vec![firing("b")]),
+        t0() + secs(1),
+    )
+    .await;
+    let leased = lease(store, "w1", t0() + secs(10)).await;
+    assert_eq!(leased.len(), 2);
+    for op in &leased {
+        store
+            .dead_letter(op.id, "channel_unusable", t0() + secs(20))
+            .await
+            .expect("dead-lettering");
+    }
+
+    assert_eq!(
+        store
+            .revive_dead_letters(
+                &DeadLetterScope::ALL.with_channel(channel()),
+                t0() + secs(30)
+            )
+            .await
+            .expect("reviving one channel"),
+        1
+    );
+
+    let still_parked = store
+        .dead_letters(&DeadLetterScope::ALL, 100)
+        .await
+        .expect("listing");
+    assert_eq!(still_parked.len(), 1, "{still_parked:?}");
+    assert_eq!(still_parked[0].channel, ChannelId::new(OTHER_CHANNEL));
+
+    // And the revived row — and only it — is work again.
+    let again = lease(store, "w2", t0() + secs(30)).await;
+    assert_eq!(again.len(), 1);
+    assert_eq!(again[0].attempts, 1, "a full budget, as an unscoped revive");
+}
+
+pub(crate) async fn reviving_one_fingerprint_takes_that_alert_and_nothing_else<S: StateStore>(
+    store: &S,
+) {
+    ingest(store, &batch(vec![firing("a"), firing("b")]), t0()).await;
+    for op in lease(store, "w1", t0()).await {
+        store
+            .dead_letter(op.id, "bad_request", t0() + secs(10))
+            .await
+            .expect("dead-lettering");
+    }
+
+    let scope = DeadLetterScope::ALL.with_fingerprint(Fingerprint::new("a"));
+    assert_eq!(
+        store
+            .revive_dead_letters(&scope, t0() + secs(600))
+            .await
+            .expect("reviving"),
+        1
+    );
+
+    // The revived alert's `failed` mark is undone; its neighbour's is not, because that
+    // alert is still undelivered and its eventual resolution still has nothing to edit.
+    assert_eq!(
+        store
+            .alert(&Fingerprint::new("a"), &channel())
+            .await
+            .expect("reading")
+            .expect("row exists")
+            .state,
+        AlertState::Claimed
+    );
+    assert_eq!(
+        store
+            .alert(&Fingerprint::new("b"), &channel())
+            .await
+            .expect("reading")
+            .expect("row exists")
+            .state,
+        AlertState::Failed
+    );
+}
+
+pub(crate) async fn a_scope_matching_nothing_changes_nothing<S: StateStore>(store: &S) {
+    // A typo in a channel name must be a no-op that reports zero, not a fall-back to the
+    // whole queue. Reviving everything because a filter did not match is the shape of
+    // mistake that makes a targeted recovery command untrustworthy.
+    ingest(store, &batch(vec![firing("abc")]), t0()).await;
+    let leased = lease(store, "w1", t0()).await;
+    store
+        .dead_letter(leased[0].id, "channel_unusable", t0() + secs(10))
+        .await
+        .expect("dead-lettering");
+
+    let wrong = DeadLetterScope::ALL.with_channel(ChannelId::new("#alrets"));
+    assert!(
+        store
+            .dead_letters(&wrong, 100)
+            .await
+            .expect("listing")
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .revive_dead_letters(&wrong, t0() + secs(600))
+            .await
+            .expect("reviving"),
+        0
+    );
+    assert_eq!(
+        store
+            .dead_letters(&DeadLetterScope::ALL, 100)
+            .await
+            .expect("listing")
+            .len(),
+        1,
+        "the row that did not match is still parked"
     );
 }
 
@@ -1422,7 +1651,10 @@ pub(crate) async fn listing_parked_rows_honours_its_limit_and_skips_live_work<S:
             .expect("dead-lettering");
     }
 
-    let all = store.dead_letters(100).await.expect("listing");
+    let all = store
+        .dead_letters(&DeadLetterScope::ALL, 100)
+        .await
+        .expect("listing");
     assert_eq!(
         all.len(),
         3,
@@ -1430,16 +1662,25 @@ pub(crate) async fn listing_parked_rows_honours_its_limit_and_skips_live_work<S:
     );
     assert!(all[0].id < all[1].id, "oldest first: {all:?}");
 
-    let limited = store.dead_letters(2).await.expect("listing");
+    let limited = store
+        .dead_letters(&DeadLetterScope::ALL, 2)
+        .await
+        .expect("listing");
     assert_eq!(limited.len(), 2);
     assert_eq!(limited[0].id, all[0].id, "the limit takes the oldest");
 }
 
 pub(crate) async fn an_idle_store_has_no_dead_letters<S: StateStore>(store: &S) {
-    assert!(store.dead_letters(100).await.expect("listing").is_empty());
+    assert!(
+        store
+            .dead_letters(&DeadLetterScope::ALL, 100)
+            .await
+            .expect("listing")
+            .is_empty()
+    );
     assert_eq!(
         store
-            .revive_dead_letters(t0())
+            .revive_dead_letters(&DeadLetterScope::ALL, t0())
             .await
             .expect("reviving nothing"),
         0,
@@ -1464,13 +1705,17 @@ pub(crate) async fn reviving_a_parked_post_makes_it_leasable_again_with_a_full_b
 
     assert_eq!(
         store
-            .revive_dead_letters(t0() + secs(600))
+            .revive_dead_letters(&DeadLetterScope::ALL, t0() + secs(600))
             .await
             .expect("reviving"),
         1
     );
     assert!(
-        store.dead_letters(100).await.expect("listing").is_empty(),
+        store
+            .dead_letters(&DeadLetterScope::ALL, 100)
+            .await
+            .expect("listing")
+            .is_empty(),
         "a revived row is no longer parked"
     );
 
@@ -1509,7 +1754,7 @@ pub(crate) async fn reviving_a_parked_post_lets_its_resolution_correlate_again<S
     );
 
     store
-        .revive_dead_letters(t0() + secs(600))
+        .revive_dead_letters(&DeadLetterScope::ALL, t0() + secs(600))
         .await
         .expect("reviving");
 
@@ -1563,7 +1808,7 @@ pub(crate) async fn reviving_leaves_a_resolved_alert_resolved<S: StateStore>(sto
 
     assert_eq!(
         store
-            .revive_dead_letters(t0() + secs(900))
+            .revive_dead_letters(&DeadLetterScope::ALL, t0() + secs(900))
             .await
             .expect("reviving"),
         1
@@ -1615,7 +1860,7 @@ pub(crate) async fn reviving_takes_the_whole_queue_and_leaves_live_work_alone<S:
 
     assert_eq!(
         store
-            .revive_dead_letters(t0() + secs(40))
+            .revive_dead_letters(&DeadLetterScope::ALL, t0() + secs(40))
             .await
             .expect("reviving"),
         2,

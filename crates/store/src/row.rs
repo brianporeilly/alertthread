@@ -166,6 +166,11 @@ impl OutboxRow {
 #[derive(Debug, sqlx::FromRow)]
 pub(crate) struct DeadLetterRow {
     pub id: i64,
+    /// The `channel` column, not the one inside `payload`. They agree by construction, and
+    /// this is the one `DeadLetterScope` filters on — so reading it back from the same
+    /// place is what makes "what you filtered on" and "what you were shown" the same thing.
+    pub channel: String,
+    pub fingerprint: Option<String>,
     pub payload: Json<serde_json::Value>,
     pub attempts: i32,
     pub last_error: Option<String>,
@@ -191,6 +196,8 @@ pub(crate) fn dead_letters(rows: Vec<DeadLetterRow>) -> Result<Vec<DeadLetter>, 
             Ok(DeadLetter {
                 id,
                 op: Op::from(stored),
+                channel: ChannelId::new(row.channel),
+                fingerprint: row.fingerprint.map(Fingerprint::new),
                 attempts: row.attempts,
                 last_error: row.last_error,
                 created_at: row.created_at,

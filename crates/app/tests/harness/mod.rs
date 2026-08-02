@@ -421,16 +421,18 @@ impl StateStore for SlowStore {
 
     async fn dead_letters(
         &self,
+        scope: &alertthread_store::DeadLetterScope,
         limit: u32,
     ) -> Result<Vec<alertthread_store::DeadLetter>, alertthread_store::StoreError> {
-        self.inner.dead_letters(limit).await
+        self.inner.dead_letters(scope, limit).await
     }
 
     async fn revive_dead_letters(
         &self,
+        scope: &alertthread_store::DeadLetterScope,
         now: DateTime<Utc>,
     ) -> Result<u64, alertthread_store::StoreError> {
-        self.inner.revive_dead_letters(now).await
+        self.inner.revive_dead_letters(scope, now).await
     }
 
     async fn prune(

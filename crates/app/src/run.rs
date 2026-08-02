@@ -388,26 +388,20 @@ pub async fn signal() -> anyhow::Result<()> {
 
 /// Where the configuration file lives, when there is one.
 ///
-/// One optional positional argument, and nothing else. A relay with a flag parser is a relay
-/// with a flag parser to keep working; everything configurable is configurable through the
-/// file or the environment, which is what a container needs anyway.
+/// The command line wins, then `ALERTTHREAD_CONFIG`, then nothing — which is the ordinary
+/// container case, where everything comes from the environment and shipping an empty file in
+/// the image to satisfy a required argument would be worse.
+///
+/// Which argument `given` came from is [`crate::cli`]'s problem: the relay takes it
+/// positionally and `alertthread replay` takes `--config`, and both resolve here so the
+/// subcommand cannot drift onto a different store from the server's.
 #[must_use]
-pub fn config_path(mut args: impl Iterator<Item = String>) -> Option<std::path::PathBuf> {
-    args.nth(1).map(std::path::PathBuf::from).or_else(|| {
+pub fn config_path(given: Option<std::path::PathBuf>) -> Option<std::path::PathBuf> {
+    given.or_else(|| {
         std::env::var("ALERTTHREAD_CONFIG")
             .ok()
             .map(std::path::PathBuf::from)
     })
-}
-
-/// Whether the command line asks for the version instead of a run.
-///
-/// Kept out of `main.rs` so it is testable, and out of `config_path` so that a file
-/// literally named `--version` is still a path rather than a surprise.
-pub fn wants_version(args: impl IntoIterator<Item = String>) -> bool {
-    args.into_iter()
-        .skip(1)
-        .any(|arg| arg == "--version" || arg == "-V")
 }
 
 /// Sets up structured logging.
@@ -582,25 +576,12 @@ slack:
     }
 
     #[test]
-    fn the_version_flag_is_recognised_and_nothing_else_is() {
-        let args = |rest: &[&str]| {
-            std::iter::once("alertthread".to_owned())
-                .chain(rest.iter().map(|s| (*s).to_owned()))
-                .collect::<Vec<_>>()
-        };
-        assert!(super::wants_version(args(&["--version"])));
-        assert!(super::wants_version(args(&["-V"])));
-        assert!(!super::wants_version(args(&[])));
-        assert!(!super::wants_version(args(&["/etc/alertthread.yaml"])));
-        // argv[0] is skipped, so a binary at a path spelled like the flag still serves.
-        assert!(!super::wants_version(vec!["--version".to_owned()]));
-    }
-
-    #[test]
-    fn the_configuration_path_comes_from_the_first_argument() {
-        let args = ["alertthread".to_owned(), "/etc/alertthread.yaml".to_owned()];
+    fn an_explicit_path_wins_over_the_environment() {
+        // Both the relay's positional argument and `replay --config` land here, so a
+        // deployment that sets ALERTTHREAD_CONFIG and then names a file on the command line
+        // gets the file it named.
         assert_eq!(
-            config_path(args.into_iter()),
+            config_path(Some(std::path::PathBuf::from("/etc/alertthread.yaml"))),
             Some(std::path::PathBuf::from("/etc/alertthread.yaml"))
         );
     }
@@ -612,7 +593,7 @@ slack:
         if std::env::var("ALERTTHREAD_CONFIG").is_ok() {
             return;
         }
-        assert_eq!(config_path(["alertthread".to_owned()].into_iter()), None);
+        assert_eq!(config_path(None), None);
     }
 
     #[tokio::test]

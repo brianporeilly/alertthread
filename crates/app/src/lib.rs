@@ -14,6 +14,7 @@
 //!
 //! | Module | What |
 //! |---|---|
+//! | [`cli`] | the command line, and why a bare `alertthread` still runs the relay |
 //! | [`config`] | figment layering, and the three settings that refuse to start |
 //! | [`auth`] | the optional bearer token on `POST /webhook`, and what it never covers |
 //! | [`http`] | the four endpoints, including why `/readyz` diverges from ADR 001 D11 |
@@ -21,14 +22,17 @@
 //! | [`delivery`] | one op, one Slack call, and ADR 001 D9's failure table |
 //! | [`ratelimit`] | the per-channel token bucket Slack's 1/sec limit requires |
 //! | [`metrics`] | ADR 001 D11, and why its gauges are sampled rather than queried |
+//! | [`replay`] | `alertthread replay`, the recovery path for a parked operation |
 //! | [`run`] | startup wiring, kept out of `main.rs` so it can be tested |
 
 pub mod auth;
+pub mod cli;
 pub mod config;
 pub mod delivery;
 pub mod http;
 pub mod metrics;
 pub mod ratelimit;
+pub mod replay;
 pub mod run;
 pub mod shutdown;
 pub mod worker;

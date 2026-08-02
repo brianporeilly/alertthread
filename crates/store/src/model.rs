@@ -274,6 +274,15 @@ pub struct DeadLetter {
     pub id: OpId,
     /// The work that never happened.
     pub op: alertthread_core::Op,
+    /// Where it was addressed. Read from the `channel` column, which is what
+    /// [`DeadLetterScope`] filters on.
+    pub channel: ChannelId,
+    /// The alert it acts on, for the four op kinds that act on one.
+    ///
+    /// `None` for a storm-collapse parent, which belongs to a group rather than to a
+    /// fingerprint. Read from the `fingerprint` column, which is what [`DeadLetterScope`]
+    /// filters on.
+    pub fingerprint: Option<Fingerprint>,
     /// How many attempts were spent before it was parked.
     pub attempts: i32,
     /// What the last failure said. `None` only for a row parked without a reason recorded.
@@ -282,6 +291,63 @@ pub struct DeadLetter {
     pub created_at: DateTime<Utc>,
     /// When it was parked.
     pub dead_lettered_at: DateTime<Utc>,
+}
+
+/// Which parked rows a dead-letter operation applies to.
+///
+/// Both filters are `AND`ed, and an unset filter matches every row — so the default,
+/// [`DeadLetterScope::ALL`], is the whole dead-letter queue. That is deliberately the
+/// value with no fields set: the automatic sweep in the app crate wants it, and asking for
+/// it by name at that call site is what keeps ADR 003 §5.1's all-or-nothing decision a
+/// written-down choice rather than a property of the only method there was.
+///
+/// The two axes are the two low-cardinality columns `outbox` already carries. The *reason*
+/// a row was parked is not among them: `last_error` holds the verbatim Slack detail, which
+/// is free text and not a stable interface to filter on.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DeadLetterScope {
+    channel: Option<ChannelId>,
+    fingerprint: Option<Fingerprint>,
+}
+
+impl DeadLetterScope {
+    /// Every parked row, whatever it is and wherever it was going.
+    pub const ALL: Self = Self {
+        channel: None,
+        fingerprint: None,
+    };
+
+    /// Narrows to one channel.
+    #[must_use]
+    pub fn with_channel(mut self, channel: ChannelId) -> Self {
+        self.channel = Some(channel);
+        self
+    }
+
+    /// Narrows to one alert.
+    #[must_use]
+    pub fn with_fingerprint(mut self, fingerprint: Fingerprint) -> Self {
+        self.fingerprint = Some(fingerprint);
+        self
+    }
+
+    /// The channel filter, if there is one.
+    pub const fn channel(&self) -> Option<&ChannelId> {
+        self.channel.as_ref()
+    }
+
+    /// The fingerprint filter, if there is one.
+    pub const fn fingerprint(&self) -> Option<&Fingerprint> {
+        self.fingerprint.as_ref()
+    }
+
+    /// Whether this scope narrows nothing.
+    ///
+    /// The caller that reports what it is about to do needs to distinguish "the whole
+    /// queue" from "a filter that happened to match everything".
+    pub const fn is_everything(&self) -> bool {
+        self.channel.is_none() && self.fingerprint.is_none()
+    }
 }
 
 /// How long finished state is kept (ADR 001 D4, retention; PRD §5.7).
@@ -518,6 +584,47 @@ mod tests {
             record.group_labels.get("alertname").map(String::as_str),
             Some("KubePodNotReady")
         );
+    }
+
+    #[test]
+    fn the_default_dead_letter_scope_is_the_whole_queue() {
+        // `ALL` and `default()` have to agree: one of them is what the automatic sweep
+        // passes and the other is what a caller building a scope up starts from.
+        assert_eq!(
+            super::DeadLetterScope::default(),
+            super::DeadLetterScope::ALL
+        );
+        assert!(super::DeadLetterScope::ALL.is_everything());
+        assert_eq!(super::DeadLetterScope::ALL.channel(), None);
+        assert_eq!(super::DeadLetterScope::ALL.fingerprint(), None);
+    }
+
+    #[test]
+    fn a_dead_letter_scope_carries_each_filter_it_was_given() {
+        let channel_only = super::DeadLetterScope::ALL.with_channel(ChannelId::new("#alerts"));
+        assert!(!channel_only.is_everything());
+        assert_eq!(channel_only.channel(), Some(&ChannelId::new("#alerts")));
+        assert_eq!(channel_only.fingerprint(), None);
+
+        let fingerprint_only =
+            super::DeadLetterScope::ALL.with_fingerprint(alertthread_core::Fingerprint::new("abc"));
+        assert!(!fingerprint_only.is_everything());
+        assert_eq!(fingerprint_only.channel(), None);
+        assert_eq!(
+            fingerprint_only.fingerprint(),
+            Some(&alertthread_core::Fingerprint::new("abc"))
+        );
+
+        // Both at once, because the two filters are ANDed rather than alternatives.
+        let both = super::DeadLetterScope::ALL
+            .with_channel(ChannelId::new("#alerts"))
+            .with_fingerprint(alertthread_core::Fingerprint::new("abc"));
+        assert_eq!(both.channel(), Some(&ChannelId::new("#alerts")));
+        assert_eq!(
+            both.fingerprint(),
+            Some(&alertthread_core::Fingerprint::new("abc"))
+        );
+        assert!(format!("{both:?}").contains("#alerts"));
     }
 
     #[test]
