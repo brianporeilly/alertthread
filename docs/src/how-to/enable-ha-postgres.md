@@ -197,9 +197,10 @@ and that is the property being relied on here.
 
 Reverse steps 3 and 4, and scale to **exactly one replica before** changing
 `storage.backend`. Two processes on one SQLite file corrupts correlation state, and nothing in
-the relay stops you: [ADR 001 D4](../adr/001-adr.md) specifies a Downward API replica check and
-it was never built (ROADMAP known open item 21). The Helm chart refuses to render
-`replicaCount > 1` on SQLite, which covers a chart-managed deployment and nothing else.
+the relay stops you: [ADR 001 D4](../adr/001-adr.md) specifies a Downward API replica check
+that was never built and, as of Phase 6, will not be — the chart is the enforcement point
+instead (ROADMAP known open item 21). It refuses to render `replicaCount > 1` on SQLite, which
+covers a chart-managed deployment and nothing else. A `kubectl scale` walks past it.
 
 ## Related
 

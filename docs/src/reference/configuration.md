@@ -699,23 +699,40 @@ see.
 
 ---
 
-## Logging
+## Logging, and the other reserved names
 
-Two environment variables, and no config-file equivalent: logging has to be configurable
-before the configuration file has been read.
+Four environment variables, and no config-file equivalent for any of them: logging has to be
+configurable before the configuration file has been read, and one of these names *is* the
+file.
 
 | Variable | Default | What |
 |---|---|---|
 | `ALERTTHREAD_LOG` | `info,alertthread=info` | A `tracing` env-filter directive |
+| `RUST_LOG` | unset | The same, consulted only when `ALERTTHREAD_LOG` is unset |
 | `ALERTTHREAD_LOG_FORMAT` | human-readable | Set to `json` for structured output |
 | `ALERTTHREAD_CONFIG` | unset | Path to the YAML file, if not given as the first argument |
 
-⚠️ **All three currently make the relay refuse to start**, with
-`unknown field: found \`log\`` or similar. The `ALERTTHREAD_` environment layer reads a name
-with no `__` in it as a *top-level* configuration key, and an unrecognised key is fatal — see
-ROADMAP known open item 22. Until that is fixed, pass the configuration file as the first
-argument instead, and there is no way to change the log filter (`RUST_LOG` is not read).
-Nested names such as `ALERTTHREAD_STORAGE__URL` are unaffected.
+**`ALERTTHREAD_LOG` wins over `RUST_LOG`.** The project-specific name is the documented one
+and the one a deployment sets on purpose; `RUST_LOG` is honoured because that is the name
+every other Rust binary answers to and it is what an operator with a quiet relay reaches for
+first. A `RUST_LOG` inherited from a base image therefore cannot override what a deployment
+asked for by name.
+
+A directive that does not parse is skipped rather than fatal, and the next source is tried.
+The worst case is logging at the level you would have had anyway; refusing to start over a
+typo in a filter would trade the whole relay for it.
+
+### Why these three are special
+
+The three `ALERTTHREAD_`-prefixed names above have no `__` in them, so the environment layer
+would otherwise read each as a *top-level* configuration key — `ALERTTHREAD_LOG` as `log` —
+and an unrecognised key is fatal. They are **reserved**: the environment provider is told to
+skip exactly these, and nothing else.
+
+Every other bare `ALERTTHREAD_<WORD>` is still fatal, and so is a misspelled nested key such
+as `ALERTTHREAD_SLACK__TOKNE`. That is the point of the strictness rather than an accident of
+it: a name the relay does not recognise has to fail loudly, not leave you believing a token is
+set. Correctly spelled nested names such as `ALERTTHREAD_STORAGE__URL` were never affected.
 
 JSON is not the default because the first thing anybody does with this binary is run it in a
 terminal, and a wall of JSON there is structured without being clear.

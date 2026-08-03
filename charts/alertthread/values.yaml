@@ -157,21 +157,27 @@ templates:
 
 # Extra environment for the relay container, as name: value.
 #
-# ⚠️ Do not set a bare `ALERTTHREAD_<WORD>` variable here. The relay reads its
-# environment with the prefix `ALERTTHREAD_` and `__` between nested keys, and
-# an unrecognised key is fatal at startup by design — so `ALERTTHREAD_CONFIG`,
-# `ALERTTHREAD_LOG` and `ALERTTHREAD_LOG_FORMAT` each parse as a top-level
-# setting that does not exist and the relay refuses to start. That is ROADMAP
-# known open item 22, it is a relay bug rather than a chart one, and until it is
-# fixed there is no working way to set the log filter. A chart test asserts none
-# is set, so this cannot be reintroduced by accident.
+# Turning the logging up lives here:
+#
+#     env:
+#       ALERTTHREAD_LOG: "info,alertthread=debug"
+#       ALERTTHREAD_LOG_FORMAT: "json"
+#
+# ⚠️ Those two, `ALERTTHREAD_CONFIG` and `RUST_LOG` are the only bare names the
+# relay accepts. It reads its environment with the prefix `ALERTTHREAD_` and
+# `__` between nested keys, and an unrecognised key is fatal at startup by
+# design — so any *other* `ALERTTHREAD_<WORD>` with no `__` in it parses as a
+# top-level setting that does not exist and the relay refuses to start. That is
+# the strictness working: it is what turns `ALERTTHREAD_SLACK__TOKNE` into a
+# crash rather than a token you believe is set. A chart test asserts the chart
+# renders no unreserved bare name.
 #
 # Nested names are fine: `ALERTTHREAD_STORAGE__URL` and the like work, and are
 # how the chart passes the PostgreSQL connection string.
 env: {}
 
 # Raw entries appended to the container's env, for a valueFrom you need and this
-# chart does not model. The same warning applies.
+# chart does not model. The same rule applies.
 extraEnv: []
 
 # ---------------------------------------------------------------------------

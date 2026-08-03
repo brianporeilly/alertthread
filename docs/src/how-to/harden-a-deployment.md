@@ -249,8 +249,9 @@ gives the volume `root:fsGroup` ownership, so a `defaultMode` of `0400` is unrea
 
 On SQLite the deployment must also be `strategy: Recreate` with exactly one replica — two
 processes on one SQLite file is not a supported configuration. The chart refuses to render
-`replicaCount > 1` on SQLite for that reason; the relay itself does not detect it (ROADMAP
-known open item 21). See [Enable HA with PostgreSQL](enable-ha-postgres.md) for the other
+`replicaCount > 1` on SQLite for that reason; the relay itself does not detect it and, by the
+decision recorded in ROADMAP known open item 21, is not going to. See
+[Enable HA with PostgreSQL](enable-ha-postgres.md) for the other
 shape, which has no PVC and no `/var/lib` mount at all.
 
 Nothing may be mounted *inside* one of these mounts, either. The parent is read-only and the

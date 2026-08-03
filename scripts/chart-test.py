@@ -83,6 +83,21 @@ def check(condition: object, message: str) -> bool:
     return True
 
 
+def reserved_env_vars() -> set[str]:
+    """The `ALERTTHREAD_*` names the relay does *not* read as configuration keys.
+
+    Parsed out of `crates/app/src/config.rs` so there is one list and not two. The constants
+    are declared individually and then collected into `RESERVED_ENV_VARS`, which is the shape
+    this resolves: named constant to literal, then array member to named constant.
+    """
+    source = (REPO / "crates" / "app" / "src" / "config.rs").read_text(encoding="utf-8")
+    literals = dict(re.findall(r'pub const (ENV_[A-Z_]+): &str = "([^"]+)";', source))
+    array = re.search(r"pub const RESERVED_ENV_VARS: \[&str; \d+\] = \[([^\]]*)\];", source)
+    if not array:
+        return set()
+    return {literals[name] for name in re.findall(r"ENV_[A-Z_]+", array.group(1)) if name in literals}
+
+
 def render(chart: Path, *args: str) -> list[dict]:
     """`helm template` with the two required values, parsed."""
     result = subprocess.run(
@@ -404,25 +419,46 @@ def test_probes(chart: Path) -> None:
     )
 
     # The relay reads `ALERTTHREAD_`-prefixed environment with `__` between nested keys, and an
-    # unrecognised key is fatal at startup by design. A bare ALERTTHREAD_<WORD> therefore parses
-    # as a top-level setting that does not exist, and ALERTTHREAD_CONFIG, ALERTTHREAD_LOG and
-    # ALERTTHREAD_LOG_FORMAT are all documented names that hit it — the config path has to be the
-    # positional argument instead. ROADMAP known open item 22.
+    # unrecognised key is fatal at startup by design — that strictness is what turns
+    # ALERTTHREAD_SLACK__TOKNE into a crash rather than a token nobody set. A bare
+    # ALERTTHREAD_<WORD> therefore parses as a top-level setting that does not exist unless the
+    # relay reserves it, so anything the chart renders has to be on the reserved list.
+    #
+    # The list is read out of the relay's source rather than repeated here: a name added there
+    # and not here would make this check quietly stricter than the binary, which is how the
+    # previous version of it ended up banning three names that now work.
+    reserved = reserved_env_vars()
+    check(reserved, "no reserved environment variables were found in the relay's source")
     for scenario in ([], ["--set", "config.storage.backend=postgres", "--set", "postgres.existingSecret=pg"]):
         container = one(render(chart, *scenario), "Deployment")["spec"]["template"]["spec"][
             "containers"
         ][0]
-        for entry in container.get("env", []):
+        # `or []` rather than a default: a chart that emits the `env:` key with nothing
+        # under it parses as None, and iterating that is a crash instead of an assertion.
+        for entry in container.get("env") or []:
             name = entry["name"]
             check(
-                not (name.startswith("ALERTTHREAD_") and "__" not in name),
-                f"{name} is a bare ALERTTHREAD_<WORD> variable: the relay reads it as a "
-                f"top-level config key, does not find one, and refuses to start",
+                not (name.startswith("ALERTTHREAD_") and "__" not in name)
+                or name in reserved,
+                f"{name} is a bare ALERTTHREAD_<WORD> variable and is not reserved: the relay "
+                f"reads it as a top-level config key, does not find one, and refuses to start",
             )
         check(
             container.get("args") == ["/etc/alertthread/config/config.yaml"],
             "the config file is not passed as the positional argument",
         )
+
+    # And the reserved names really are settable through `env`, which is the supported way to
+    # turn the logging up. Asserting only that the chart sets none of them would pass just as
+    # well for a chart that could not set them at all.
+    log = one(
+        render(chart, "--set", "env.ALERTTHREAD_LOG=info\\,alertthread=debug"), "Deployment"
+    )["spec"]["template"]["spec"]["containers"][0]
+    rendered = {e["name"]: e.get("value") for e in log.get("env") or []}
+    check(
+        rendered.get("ALERTTHREAD_LOG") == "info,alertthread=debug",
+        f"env.ALERTTHREAD_LOG does not reach the container: {rendered}",
+    )
 
     grace_value = values["config"]["server"]["shutdown_grace"]
     match = re.fullmatch(r"(\d+)(ms|s|m|h|d)?", str(grace_value))

@@ -204,11 +204,24 @@ kubectl -n observability exec deploy/alertthread -- \
 
 It is a dry run without `--commit`, and it is safe against a live relay.
 
-`--config` rather than the `ALERTTHREAD_CONFIG` environment variable, which the chart
-deliberately does not set: setting it makes the relay refuse to start (ROADMAP known open item
-22). The same applies to `ALERTTHREAD_LOG` and `ALERTTHREAD_LOG_FORMAT` — do not put any bare
-`ALERTTHREAD_<WORD>` variable in `env` or `extraEnv`. Nested names such as
-`ALERTTHREAD_STORAGE__URL` are unaffected.
+`--config` rather than the `ALERTTHREAD_CONFIG` environment variable. Both work; the flag is
+explicit about which file this invocation used, and the chart does not set the variable, so
+there is nothing to disagree with.
+
+Three `ALERTTHREAD_` names with no `__` in them are reserved — `ALERTTHREAD_CONFIG`,
+`ALERTTHREAD_LOG` and `ALERTTHREAD_LOG_FORMAT` — and those three are safe to put in `env` or
+`extraEnv`. `RUST_LOG` works too, and carries no prefix to collide with. Any *other* bare
+`ALERTTHREAD_<WORD>` parses as a top-level configuration key that does not exist and stops the
+relay, which is what makes a misspelling visible instead of silent. A chart test asserts the
+chart itself only ever sets reserved bare names. See
+[Configuration](../reference/configuration.md) for the full rule.
+
+To turn the relay's logging up:
+
+```bash
+helm upgrade alertthread alertthread/alertthread \
+    --reuse-values --set env.ALERTTHREAD_LOG='info\,alertthread=debug'
+```
 
 ## Why the CRDs are not optional
 

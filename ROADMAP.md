@@ -663,55 +663,97 @@ a `/still-firing` slash command.
     `image.repository`/`appVersion` name `ghcr.io/brianporeilly/alertthread:0.1.0`, which does
     not exist until PR B publishes it.
 
-21. **ADR 001 D4 specifies a Downward API replica check that was never built.** D4 says "if
-    SQLite is configured and `replicas > 1` is detected (via the Downward API), the process
-    **refuses to start**". It does not. Nothing in the relay reads the Downward API, and two
-    processes opening one SQLite file is exactly the corruption D4 was protecting against.
+21. ~~**ADR 001 D4 specifies a Downward API replica check that was never built.**~~
+    **Accepted as a divergence in Phase 6 PR C: the guard is not being built, and the chart
+    is the enforcement point.** D4 says "if SQLite is configured and `replicas > 1` is
+    detected (via the Downward API), the process **refuses to start**". It does not, and it
+    will not. Nothing in the relay reads the Downward API.
 
-    Phase 6 PR A guards it one level out: the chart refuses to render `replicaCount > 1` on
-    SQLite, with a message naming the backend to switch to. That covers a chart-managed
-    deployment and nothing else — a `kubectl scale`, a raw manifest, or two pods from
-    different releases all walk straight past it.
+    What does hold: the chart refuses to render `replicaCount > 1` on SQLite, with a message
+    naming the backend to switch to. A chart-managed deployment is the realistic consumer of
+    this project, and that is where the guard now lives.
+
+    What is therefore not covered, stated rather than implied: a `kubectl scale`, a raw
+    manifest, or two pods from different releases all walk straight past it, and two
+    processes on one SQLite file corrupts correlation state. `how-to/enable-ha-postgres.md`
+    says so at the point an operator would do it.
+
+    Building the relay half was weighed and declined. It is cheap in isolation — read
+    `spec.replicas` from an env var the chart already knows how to set — but it buys
+    enforcement only for deployments that pass the variable, which is the same set the chart
+    already covers, and a `kubectl scale --replicas=2` sets no environment at all. A guard
+    that refuses to start is also a new way to be silent, and the way to be wrong about it is
+    to read a stale value. Paying for that to re-cover the covered case is the wrong trade.
 
     Found while writing the chart, not by reading D4; `how-to/enable-ha-postgres.md` had been
-    asserting the check existed since Phase 2. That claim is corrected. **Decide whether to
-    build it** rather than leaving the divergence recorded: the relay half is cheap (read
-    `spec.replicas` from an env var the chart already knows how to set) and it is the only
-    version that holds for somebody not using the chart. Not done here because it is relay
-    behaviour in a release PR, and a change that can refuse to start belongs with tests for
-    every way it can be wrong.
+    asserting the check existed since Phase 2, and that claim was corrected in Phase 6 PR A.
+    Deliberately **not** written up as an ADR here: Phase 6 batches its divergences at
+    closeout the way ADR 003 did for Phase 5, and this is one of them.
 
-22. **Every documented bare `ALERTTHREAD_*` environment variable makes the relay refuse to
-    start.** Found by booting the relay against the ConfigMap the chart renders, which is a
-    thing nothing had done before.
+22. ~~**Every documented bare `ALERTTHREAD_*` environment variable makes the relay refuse to
+    start.**~~ **Resolved in Phase 6 PR C: the non-config names are reserved, and the
+    strictness that caused it is untouched.** Found by booting the relay against the ConfigMap
+    the chart renders, which is a thing nothing had done before.
 
-    `Config::figment` merges `Env::prefixed("ALERTTHREAD_").split("__")`, and `Config` denies
+    `Config::figment` merged `Env::prefixed("ALERTTHREAD_").split("__")`, and `Config` denies
     unknown fields — deliberately, because a misspelled key is a setting an operator believes
-    is in effect. A name with no `__` in it therefore parses as a *top-level* key:
+    is in effect. A name with no `__` in it therefore parsed as a *top-level* key:
+    `ALERTTHREAD_CONFIG` as `config`, `ALERTTHREAD_LOG` as `log`, `ALERTTHREAD_LOG_FORMAT` as
+    `log_format`. All three were documented in `reference/configuration.md`, and
+    `run::config_path` reads `ALERTTHREAD_CONFIG` — the code that consumed it was correct and
+    never ran, because the figment layer rejected the variable first. Nested names were
+    unaffected: `ALERTTHREAD_STORAGE__URL` worked, which is why nothing noticed.
 
-    | Variable | Parses as | Result |
-    |---|---|---|
-    | `ALERTTHREAD_CONFIG` | `config` | refuses to start |
-    | `ALERTTHREAD_LOG` | `log` | refuses to start |
-    | `ALERTTHREAD_LOG_FORMAT` | `log_format` | refuses to start |
+    **The fix is `Env::ignore`, not a loosened `deny_unknown_fields`.** The three names are
+    one constant, `config::RESERVED_ENV_VARS`, and the provider is told to skip exactly them.
+    Every other unknown key is as fatal as it was — `ALERTTHREAD_SLACK__TOKNE` still stops the
+    relay, which is the whole reason the strictness is there.
 
-    All three are documented in `reference/configuration.md`, and `run::config_path` reads
-    `ALERTTHREAD_CONFIG` — the code that consumes it is correct and never runs, because the
-    figment layer rejects the variable first. Nested names are unaffected:
-    `ALERTTHREAD_STORAGE__URL` works, which is why nothing noticed.
+    **`RUST_LOG` is now honoured as a fallback**, after `ALERTTHREAD_LOG`. The argument is in
+    the PR: the failure being fixed is "nobody can turn the logging up", and the name an
+    operator reaches for without reading anything is `RUST_LOG`. Precedence rather than
+    equality, so a `RUST_LOG` inherited from a base image cannot override what a deployment
+    set by name. `compose.yaml`'s `RUST_LOG`, inert since Phase 4, does something now.
 
-    Two consequences beyond the obvious. **There is currently no way to set the log filter at
-    all**: `ALERTTHREAD_LOG` refuses to start and `RUST_LOG` is not read — `init_tracing` only
-    ever asks for `ALERTTHREAD_LOG`. `compose.yaml` sets `RUST_LOG` on the relay and it has
-    been inert since Phase 4. And the demo stack never hit the startup failure because it
-    configures the relay entirely through nested names.
+    Three tests, because the reason this shipped is that each layer alone would have missed
+    it. `crates/app/tests/environment.rs` starts the real binary with each reserved variable
+    set and asks it for a `200` — nothing had ever done that.
+    `config::every_documented_bare_variable_is_reserved` scans the operator-facing surfaces
+    for `ALERTTHREAD_*` literals and fails when one is documented but not reserved, because
+    the bug arrived as documentation before it arrived as a bug report.
+    `a_bare_variable_that_is_not_reserved_still_refuses_to_start` pins the fatality that was
+    never the problem.
 
-    Worked around in Phase 6 PR A rather than fixed: the chart passes the config file as the
-    positional argument, sets no bare `ALERTTHREAD_<WORD>` variable, and a chart test asserts
-    it stays that way. **The fix is relay-side and wants its own PR** — the shape is to skip
-    the three reserved names in the `Env` provider, with a test per name asserting the relay
-    starts with it set, plus one asserting a genuinely unknown key is still fatal, because
-    that fatality is a decision and not an accident.
+    Phase 6 PR A's chart-side workaround is retired with it. The chart still passes the config
+    file positionally — explicit beats implicit, and `kubectl describe` shows which file the
+    pod is on — but `values.yaml` now documents `ALERTTHREAD_LOG` under `env` as the supported
+    way to raise the log level, and `scripts/chart-test.py`'s check is narrowed from "no bare
+    `ALERTTHREAD_<WORD>` at all" to "no *unreserved* one", reading the list out of
+    `config.rs` so the chart cannot end up stricter than the binary.
+
+23. **The reserved environment variables are parsed leniently, and every other setting is
+    parsed strictly.** Noticed while fixing item 22, and left as it is on purpose.
+
+    `ALERTTHREAD_LOG_FORMAT` is `json` or it is not; `structured`, `jsonl` and `json ` all
+    silently produce human-readable output. `ALERTTHREAD_LOG` and `RUST_LOG` fall through to
+    the next source when the directive does not parse, so `ALERTTHREAD_LOG=infoo` logs at
+    `info` and says nothing about it. Both are exactly the shape this project calls out
+    elsewhere — a setting an operator believes is in effect and is not — and the config layer
+    two lines away refuses to start over the same class of typo.
+
+    **Not fixed, because the obvious fix is worse and the good one is not obvious.** Refusing
+    to start over a malformed log filter trades the entire relay for a typo in a diagnostic,
+    which is the wrong direction for a service whose worst failure is silence. Warning instead
+    is the right shape and lands in an awkward place: the only thing that could carry the
+    warning is the subscriber being configured, and a filter of `error` — plausible in exactly
+    the deployment that is trying to quieten the relay — filters the warning out. Emitting to
+    stderr before the subscriber exists sidesteps that and puts an unstructured line in front
+    of a JSON log consumer.
+
+    **Revisit** whenever `init_tracing` next changes. The candidate is to hold the rejected
+    directive and re-emit it at `error` after the subscriber is up, plus an explicit
+    `ALERTTHREAD_LOG_FORMAT` match that treats an unrecognised value the same way — both cheap
+    once somebody is already in that function, and neither worth a PR of its own.
 
 ## Process notes worth keeping
 
