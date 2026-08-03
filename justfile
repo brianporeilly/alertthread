@@ -86,6 +86,16 @@ check-workflows:
         echo "       go install github.com/rhysd/actionlint/cmd/actionlint@latest" >&2
         exit 1
     fi
+    # actionlint shells out to shellcheck for every `run:` block and silently
+    # skips all of it when shellcheck is absent — a local pass without it is a
+    # weaker check than CI's, which is exactly how a green local run preceded a
+    # red CI job here. Say so rather than exiting 0 on half a check.
+    if ! command -v shellcheck >/dev/null 2>&1; then
+        echo "error: shellcheck is not installed, so actionlint would skip every" >&2
+        echo "       shell check and pass on workflows CI rejects." >&2
+        echo "       dnf install ShellCheck  /  brew install shellcheck" >&2
+        exit 1
+    fi
     actionlint
 
 # ---------------------------------------------------------------------------

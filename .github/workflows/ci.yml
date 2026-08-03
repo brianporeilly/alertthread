@@ -173,9 +173,26 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: extractions/setup-just@v3
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: actionlint
+      # Not taiki-e/install-action: it has no actionlint entry, falls back to
+      # cargo-binstall, and actionlint is a Go binary rather than a crate, so
+      # the fallback can only ever fail. Pinned release plus checksum instead.
+      - name: install actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$archive" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${archive}"
+          echo "${ACTIONLINT_SHA256}  ${archive}" | sha256sum -c -
+          tar -xzf "$archive" actionlint
+          sudo install -m 0755 actionlint /usr/local/bin/actionlint
+          rm -f "$archive" actionlint
+      # shellcheck is preinstalled on ubuntu runners; actionlint silently skips
+      # every shell check when it is absent, so a local run without it is not
+      # the same check as this one.
+      - run: shellcheck --version
       # The release workflow's first real exercise is the first tag. A YAML or
       # expression error in it would surface there, which is the worst possible
       # moment, so it is linted on every pull request instead.
