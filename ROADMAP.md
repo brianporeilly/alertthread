@@ -417,6 +417,8 @@ nothing in it changes what the relay does, and all of it changes how somebody ge
   `appVersion`, which PR A left as static numbers
 - mdBook published to GitHub Pages
 - All four Diátaxis quadrants complete
+- Builder base moved to Project Hummingbird if the musl spike allows (known open item 24) —
+  sequenced *before* the signing work, so provenance is attached to the base we intend to keep
 - **v0.1.0**
 
 ### What Phase 5 handed it
@@ -754,6 +756,43 @@ a `/still-firing` slash command.
     directive and re-emit it at `error` after the subscriber is up, plus an explicit
     `ALERTTHREAD_LOG_FORMAT` match that treats an unrecognised value the same way — both cheap
     once somebody is already in that function, and neither worth a PR of its own.
+
+24. **The builder base should move to Project Hummingbird; the runtime stays `scratch`.**
+    Decided in review on 2026-08-02. [Hummingbird](https://hummingbird-project.io/docs/using/overview/)
+    is Red Hat's minimal-hardened-image project: distroless by default, non-root, hermetic
+    builds, cosign-verified signatures, SLSA provenance, SBOMs, and FIPS variants.
+
+    **The runtime image is not the part that benefits.** `Dockerfile`'s final stage is
+    `FROM scratch` holding a static musl binary and a CA bundle — no libc, no shell, no package
+    manager. Hummingbird's distroless variant is excellent and still has a userland, so swapping
+    `scratch` for it would *increase* attack surface. Their own multi-stage guidance for compiled
+    languages points the same way; `scratch` is the more aggressive version of the runtime half
+    of it, and their documented example uses `hi/core-runtime` rather than `scratch` only because
+    it is written for the general case.
+
+    **The builder stage is where the real gap is.** It is currently
+    `docker.io/library/rust:1.97.1-alpine3.22` — unsigned, no provenance, no attestation. PR B is
+    about to attach cosign signatures and SLSA provenance to artefacts built on top of it, and
+    signing an artefact built on an unattested base leaves the weakest link exactly where the
+    claims are strongest. **So this is sequenced before the signing work, not after.**
+
+    **Spike first — the assumption is not free.** Hummingbird documents no Rust builder image and
+    says nothing about musl or static linking; its example is Go, which links statically without a
+    C toolchain. Rust targeting `x86_64-unknown-linux-musl` needs a musl toolchain in the builder,
+    and Hummingbird is RHEL-lineage, where `musl-gcc` is not a default package. This is the same
+    class of assumption as Phase 0's musl-on-`scratch` spike, and gets the same treatment: prove
+    it before building on it. Fallbacks, in order, so nobody stalls on the decision:
+
+    1. A Hummingbird builder that produces the musl static binary. `scratch` runtime unchanged.
+    2. Hummingbird for every stage it can serve, with a digest-pinned `rust:alpine` retained only
+       for the musl link step. A partial win, labelled as partial.
+    3. Neither works: keep `rust:alpine`, pin it by digest, attest it in PR B, and record that the
+       builder base is still the weakest link rather than implying it is solved.
+
+    **Abandoning `scratch` for a hardened runtime base is not on that list.** The one thing that
+    would reopen it is a FIPS requirement: a static musl binary with `rustls` cannot be
+    FIPS-validated, and Hummingbird's FIPS variants are the reason that would matter. Written down
+    now so it is not rediscovered under compliance pressure.
 
 ## Process notes worth keeping
 
