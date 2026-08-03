@@ -11,7 +11,7 @@ the tree in a state where the next phase is the only thing that makes it work.
 
 ## Current status
 
-*Last updated 2026-07-30. Keep this current — it is the first thing anyone picking the
+*Last updated 2026-08-03. Keep this current — it is the first thing anyone picking the
 project up will read, and git log does not distinguish "in review" from "abandoned".*
 
 | Phase | State |
@@ -27,8 +27,12 @@ project up will read, and git log does not distinguish "in review" from "abandon
 | 5 — Hardening, PR B | ✅ merged (#16) — webhook bearer auth, container hardening, alert rules, the two Diátaxis pages, `just pre-push` |
 | 5 — closeout | ✅ merged (#17) — ADR 003 batching the divergences below |
 | ↳ `alertthread replay` | ✅ merged (#18) — the subcommand ADR 003 §5.2 decided |
-| **6 — Release, PR A** | 🟡 **in review — the Helm chart** |
-| 6 — Release, PR B | ⬜ next — multi-arch images, cosign, SBOM, `release-please`, Pages, v0.1.0 |
+| 6 — Release, PR A | ✅ merged (#19) — the Helm chart |
+| ↳ reserved `ALERTTHREAD_*` names | ✅ merged (#20) — known open item 22 |
+| ↳ builder base pinned by digest | ✅ merged (#21, #22) — the Hummingbird spike, known open item 24 |
+| **6 — Release, PR B2** | 🟡 **in review — publishing: multi-arch, cosign, SBOM, `release-please`, Pages** |
+| 6 — closeout | ⬜ next — the ADR batching Phase 6's divergences |
+| **v0.1.0** | ⬜ **not cut.** The pipeline exists and has never run — known open item 27 |
 
 ADRs [001](docs/src/adr/001-adr.md), [002](docs/src/adr/002-implementation-gaps.md) and
 [003](docs/src/adr/003-hardening-divergences.md) are merged and accepted.
@@ -410,16 +414,25 @@ nothing in it changes what the relay does, and all of it changes how somebody ge
 
 ### PR B — publishing
 
-- Multi-arch (`amd64`/`arm64`) images to ghcr.io
-- Cosign keyless signing + SBOM attestation
+Split again once the Hummingbird spike turned into work of its own. B1 was the builder-base
+sequencing (#21, #22); B2 is the publishing pipeline.
+
+- Multi-arch (`amd64`/`arm64`) images to ghcr.io — **native builds on native runners**, not
+  QEMU. The Dockerfile compiles a native musl binary on Alpine, so emulating it would both
+  reintroduce the cross-compilation category the base was chosen to avoid and make the job
+  unusably slow
+- Cosign keyless signing + SBOM attestation, plus a `build-inputs` attestation naming the
+  digest-pinned builder base — item 24's fallback 3 said the builder stays the weakest link,
+  and this is what stops that being invisible
 - The chart published as an OCI artifact (matching home-ops' existing consumption pattern)
 - `release-please` for changelog + tagging — including `Chart.yaml`'s `version` and
   `appVersion`, which PR A left as static numbers
 - mdBook published to GitHub Pages
 - All four Diátaxis quadrants complete
 - Builder base moved to Project Hummingbird if the musl spike allows (known open item 24) —
-  sequenced *before* the signing work, so provenance is attached to the base we intend to keep
-- **v0.1.0**
+  **done in B1: it could not move, so it is pinned by digest and attested instead**
+- **v0.1.0** — *not part of B2.* Cutting the tag is the owner's decision and nothing in B2
+  fires on a merge to `main`
 
 ### What Phase 5 handed it
 
@@ -660,10 +673,11 @@ a `/still-firing` slash command.
     if `deploy/` stops having non-Helm consumers — at which point the chart's copy becomes the
     original and `deploy/` becomes the generated one.
 
-    Two smaller seams from the same PR, both PR B's to close: `Chart.yaml`'s `version` and
-    `appVersion` are static and need wiring into `release-please`, and the default
-    `image.repository`/`appVersion` name `ghcr.io/brianporeilly/alertthread:0.1.0`, which does
-    not exist until PR B publishes it.
+    Two smaller seams from the same PR, both PR B's to close, and **both closed in PR B2**:
+    `Chart.yaml`'s `version` and `appVersion` are now `0.0.0` behind
+    `x-release-please-version` markers and move with the tag, and the default
+    `image.repository`/`appVersion` no longer name a `0.1.0` that nothing publishes — they
+    name `0.0.0`, which is the honest statement that nothing is released yet.
 
 21. ~~**ADR 001 D4 specifies a Downward API replica check that was never built.**~~
     **Accepted as a divergence in Phase 6 PR C: the guard is not being built, and the chart
@@ -885,7 +899,18 @@ a `/still-firing` slash command.
     live in one part of a Dockerfile and ignored a few lines later. Do not assume an override
     took effect without echoing it.
 
-26. **The build-and-packaging size figures are Phase 0 projections and have been overtaken.**
+26. ~~**The build-and-packaging size figures are Phase 0 projections and have been
+    overtaken.**~~ **Resolved in Phase 6 PR B2 by measuring rather than patching.**
+    `docs/src/explanation/build-and-packaging.md` now leads with the shipped artefact —
+    binary **8 659 056** bytes (`sha256:b1411e4a…b90f`), CA bundle **179 359** bytes, image
+    **8 847 180** bytes — and keeps the Phase 0 table below it, labelled as the projection it
+    was. The Dockerfile's own "6.02 MB" comment went with it.
+
+    **ADR 001 is not edited.** Its "~8 MB static musl binary on `scratch`" is now slightly
+    exceeded, and that divergence is Phase 6's closeout ADR to record, alongside item 21's.
+    The estimate was a decision input and is preserved as written.
+
+    The original finding, for the record:
     `docs/src/explanation/build-and-packaging.md` states **6.02 MB** as "the number to
     compare against" and notes "roughly 2 MB of headroom before the published figure is"
     exceeded. Measured on `main` at the time of item 24's spike: binary **8 659 056 bytes**,
@@ -898,6 +923,91 @@ a `/still-firing` slash command.
     fixed here** because item 24's PR is a build-provenance change and re-measuring the
     packaging docs is a separate edit with its own review. Worth doing the next time anything
     touches that page, and worth a fresh measurement rather than a patched number.
+
+27. **The release pipeline is built and has never run, and several parts of it cannot be
+    proven without publishing.** Written down as a list rather than left as a vague caveat,
+    because "it should work" is what every one of these sounds like right up until the tag.
+
+    What *was* exercised in PR B2: `actionlint` with `shellcheck` over all five workflows;
+    `scripts/release-version.py` watched rejecting eight distinct drifts; the Dockerfile's
+    `TARGETARCH` derivation building byte-identically to the previous amd64 image (same podman
+    image ID, same binary sha256); `syft scan file:Cargo.lock` producing a 303-package SPDX
+    2.3 document; `syft` over the `scratch` image producing **zero** artefacts, which is why
+    the SBOM is generated from the lock file; `helm lint` and `scripts/chart-test.py` against
+    the `0.0.0` chart.
+
+    What the first tag is the first exercise of:
+
+    - **The cosign certificate identity string.** The docs give
+      `…/release.yml@refs/tags/v<version>`, derived from `GITHUB_REF` on a `release` event. If
+      it differs, `cosign verify` fails closed and
+      `how-to/verify-artifacts.md` §1 has the command that prints what actually signed it.
+    - **`RELEASE_PLEASE_TOKEN`.** A tag or release created with the default `GITHUB_TOKEN`
+      does not start another workflow run, so without this secret the release PR merges, the
+      tag appears, and **nothing is published**. That is the safe direction to fail, and
+      `release.yml` can be dispatched by hand against the tag to recover. It is still a
+      one-time setup step nobody will remember.
+    - **`release-please`'s `rust` strategy against a workspace-only `Cargo.toml`.** The root
+      manifest has no `[package]`, so the strategy's Cargo updaters may do nothing; the
+      `x-release-please-version` markers and `extra-files` are what actually rewrite the
+      versions, and `just check-version` is what fails if neither did. The failure mode is a
+      release PR that does not open or opens wrong — visible, before any tag exists.
+    - **`Cargo.lock`'s own-package versions.** Nothing rewrites the `alertthread*` entries in
+      the lock file, and they cannot carry a marker because `cargo` strips comments. The next
+      `cargo build` after a release fixes it in place, so the consequence is a stray lock diff
+      on somebody's next PR, not a broken artefact. Left alone deliberately; a
+      `check-version` that also read `Cargo.lock` would pass or fail depending on whether
+      `cargo` had already run in that job, which is worse than not checking.
+    - **`ubuntu-24.04-arm` availability and timing.** Free on public repositories. No arm64
+      build of this Dockerfile has ever been run, on any runner.
+    - **`docker buildx imagetools create`** assembling the two per-arch digests, and the
+      manifest-list digest that everything is then signed against.
+    - **ghcr.io push permissions** for both the image and, separately, the Helm OCI push.
+    - **GitHub Pages.** Not enabled on the repository — `GET /repos/…/pages` is a 404. Until
+      Settings → Pages → Source is set to GitHub Actions, `docs.yml` fails at its deploy step.
+
+    **Revisit by** running `release.yml` via `workflow_dispatch` with `dry_run: true` before
+    tagging. That path builds both architectures, smoke-tests both, generates the SBOM and the
+    predicate and packages the chart, and pushes nothing — it closes the arm64 and the SBOM
+    questions without closing the registry ones.
+
+28. **The SBOM is the workspace's lock file, which is a superset of what ships.**
+    `Cargo.lock` covers dev-dependencies and `dev/slack-mock`, none of which are linked into
+    the binary, so a vulnerability scan against the published SBOM can produce a finding for a
+    crate that is not in the image.
+
+    The alternative is not "scan the image": the image is `FROM scratch` with a static binary
+    and a CA bundle, and `syft` finds **zero** packages in it — an empty document that looks
+    like a complete one, which is the worst of the three options. That was measured, not
+    assumed.
+
+    The narrow answer is [`cargo auditable`](https://github.com/rust-secure-code/cargo-auditable),
+    which embeds the built binary's actual dependency list in a custom ELF section that `syft`
+    reads back off the image. **Not taken here** because it adds a tool to the builder stage
+    and its interaction with `strip = true` in the release profile needs proving rather than
+    assuming, and this PR was already the one attaching signatures to an unattested base.
+
+    **Revisit** whenever the Dockerfile's builder stage is next opened. The check is cheap and
+    concrete: build with `cargo auditable build`, then `syft scan <image>` and confirm the
+    artefact count is non-zero and matches `cargo tree -e normal`. Between over- and
+    under-reporting, the current behaviour errs in the safe direction, so this is an
+    improvement rather than a defect.
+
+29. **The tutorial quadrant has one page, and the obvious second one is deliberately not
+    written.** The Diátaxis audit in PR B2 found real gaps in how-to (verifying artefacts),
+    reference (what a release publishes) and explanation (what the signatures prove), and
+    filled them. It found a fourth candidate — a cluster tutorial, `kind` or otherwise — and
+    did not.
+
+    A tutorial has to work, first time, for somebody who does not yet know what any of it
+    means. The cluster path today either installs from an `oci://` reference that does not
+    resolve, or teaches a build-and-side-load dance that stops being the right instruction the
+    moment v0.1.0 exists. Writing it now means writing it twice, and the failure mode of a
+    tutorial that does not work is a reader who concludes the project does not work.
+
+    **Write it after v0.1.0**, against the published chart and image, and verify it by running
+    it. `how-to/install-with-helm.md` covers the goal-directed version in the meantime, which
+    is the right quadrant for somebody who already knows what a chart is.
 
 ## Process notes worth keeping
 

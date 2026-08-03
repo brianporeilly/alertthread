@@ -22,6 +22,11 @@ cargo install cargo-binstall
 cargo binstall just cargo-nextest cargo-llvm-cov cargo-mutants cargo-deny mdbook
 ```
 
+Two more tools are needed by `just pre-push` and are not Rust crates: `helm`, for the chart
+checks, and [`actionlint`](https://github.com/rhysd/actionlint), for the workflow lint.
+`actionlint` picks up `shellcheck` if it is installed and checks the shell inside every
+`run:` block, which is worth having.
+
 ### Container engine
 
 The dev stack and the image build need a container engine. The recipes **detect podman or
@@ -153,11 +158,42 @@ burned — rotate it, do not just amend the commit.
 
 ## Before you open a PR
 
-1. `just ci` passes, including the coverage gate.
+1. `just pre-push` passes. `just ci` is the fast half of it and is **not** all of CI.
 2. Tests exist per the table in AGENTS.md, and fail without your change.
 3. Changes to `alertthread-core` leave no surviving mutants.
 4. Docs updated in the right quadrant.
 5. **No new path can result in an alert going unposted.**
+
+## Releasing
+
+Nothing releases by merging. The flow has exactly one human decision in it and this is it.
+
+1. Merging to `main` runs `release-please`, which opens or updates **a release pull
+   request**: the changelog, and the version in the four places `just check-version` knows
+   about. It creates no tag.
+2. Review that pull request. The version it proposes comes from the Conventional Commit
+   prefixes since the last release; `Release-As: x.y.z` in a commit body overrides it.
+3. **Merging the release pull request is what cuts the tag and the GitHub release.** That is
+   the decision.
+4. The release event runs `release.yml` (multi-arch image, cosign signature, SBOM and
+   build-inputs attestations, chart to `oci://ghcr.io/…/charts`) and `docs.yml` (the book to
+   Pages).
+
+Two things have to be set up once, by somebody with repository admin:
+
+- **`RELEASE_PLEASE_TOKEN`** — a fine-grained PAT with `contents: write` and
+  `pull-requests: write`. Without it, release-please falls back to `GITHUB_TOKEN`, and a tag
+  created with that token does not start another workflow run: the tag appears and **nothing
+  is published**. `release.yml` can then be dispatched by hand against the tag, with
+  `dry_run: false`.
+- **Pages** — Settings → Pages → Source: GitHub Actions. `docs.yml` fails at its deploy step
+  until this is done.
+
+To rehearse without publishing, run `release.yml` from the Actions tab with `dry_run: true`
+(the default). It builds both architectures, smoke-tests them, generates the SBOM and the
+build-inputs predicate and packages the chart, and pushes nothing.
+
+Never edit a version by hand. `just check-version` fails when the four places disagree.
 
 ## When to stop and ask
 

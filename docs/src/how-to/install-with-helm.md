@@ -8,9 +8,12 @@ It renders the Deployment, Service, ServiceAccount, ConfigMap, PVC, `ServiceMoni
 `PrometheusRule`, and it is where the container hardening in
 [Harden a deployment](harden-a-deployment.md) is *enforced* rather than described.
 
-> **Status.** Phase 6 PR B publishes the chart as an OCI artifact and the images it points at.
-> Until it lands, `helm install` from a git checkout: the `oci://` reference below and the
-> default image tag both name things that do not exist yet.
+> **Status.** The pipeline that publishes the chart and its images is built and has never
+> run: nothing is released until `v0.1.0` is tagged. Until then, `helm install` from a git
+> checkout — the `oci://` reference below and the default image tag both name things that do
+> not exist yet, and the chart's `appVersion` is `0.0.0`.
+> [Published artefacts](../reference/published-artifacts.md) is what a release will produce,
+> and [Verify artefacts](verify-artifacts.md) is how to check it.
 
 ## Before you start
 
@@ -244,6 +247,7 @@ looks identical to a healthy relay.
 
 ## Where to look next
 
+- [Verify artefacts](verify-artifacts.md) — check the signature and read the SBOM before you install
 - [Harden a deployment](harden-a-deployment.md) — what the chart enforces, and the webhook token
 - [Alert on the relay](alert-on-the-relay.md) — the bypass route, in full
 - [Configuration](../reference/configuration.md) — every key under `config:`

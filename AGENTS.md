@@ -202,15 +202,21 @@ just chart      # helm lint + the assertions on what the chart renders
 just chart-sync # copy deploy/alertthread.rules.yaml into the chart
 just up/down    # compose dev stack (podman or docker, auto-detected)
 just e2e        # the asserted end-to-end demo (needs a container engine)
-just ci         # the fast half of CI: lint, test + coverage gate, docs, licences
-just pre-push   # ci + the alert-rule check + the image build + e2e
+just ci         # the fast half of CI: lint, version check, test + coverage gate, docs, licences
+just pre-push   # ci + the workflow lint + the alert-rule check + the image build + e2e
 ```
 
 **`just ci` is not all of CI, and saying it was cost us a break in `main` once.** Three jobs
 need a container engine and are separate recipes — the image build, `just e2e`, and the
-`promtool` check on `deploy/alertthread.rules.yaml` — and `just chart` needs `helm`.
-`just pre-push` is `ci` plus those four, and it fails with a legible message when a tool is
-missing rather than skipping the job.
+`promtool` check on `deploy/alertthread.rules.yaml` — `just chart` needs `helm`, and
+`just check-workflows` needs `actionlint`. `just pre-push` is `ci` plus those five, and it
+fails with a legible message when a tool is missing rather than skipping the job.
+
+Three checks are private recipes that a public one calls, so `just --list` stays the set
+above: `check-deps` and `check-links` from `lint` and `docs`, and **`check-version`** from
+`ci` — `scripts/release-version.py`, which fails when the four places the version lives
+disagree or when one of them loses its `x-release-please-version` marker. `check-workflows`
+runs `actionlint` over every workflow and is reached by `pre-push`.
 
 **Run `just pre-push` before proposing a change.** Two CI jobs are still outside it and have to
 be run by hand when relevant: `just test-pg` (needs `just up`, and `pre-push` will not tear
@@ -277,7 +283,12 @@ Real ones, discovered the hard way. Each has cost somebody time.
 ## Commits and PRs
 
 - Conventional Commits — `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`.
-  `release-please` derives the changelog from these, so the prefix matters.
+  `release-please` derives the changelog *and the next version number* from these, so the
+  prefix matters. `feat:` bumps the minor, `fix:` the patch, and a `!` or a
+  `BREAKING CHANGE:` footer bumps the minor while the project is pre-1.0.
+- **Never edit a version by hand.** Four places carry it and `release-please` owns all four —
+  `Cargo.toml`'s `[workspace.package]` version and its three path dependencies, and
+  `Chart.yaml`'s `version` and `appVersion`. `just check-version` fails when they disagree.
 - Explain **why** in the body, not what. The diff shows what.
 - Never commit secrets. Slack tokens are `xoxb-…`; if one is ever committed, it is burned —
   rotate it, do not just amend the commit.

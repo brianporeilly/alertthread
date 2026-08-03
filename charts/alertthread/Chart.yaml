@@ -3,15 +3,14 @@ name: alertthread
 description: Alertmanager to Slack relay with fingerprint-keyed threading and update-on-resolve
 type: application
 
-# `version` is the chart's, `appVersion` the relay's. They are separate numbers
-# because a chart-only change (a probe default, a new value) must be installable
-# without claiming a new relay build exists.
+# Both numbers are release-please's; do not edit them by hand. One release train
+# means one version, and every tag publishes an image, so `appVersion` always
+# names a tag that exists. `scripts/release-version.py` fails the build when one
+# of the four places the version lives is left behind.
 #
-# Both are bumped by release-please, which Phase 6 PR B wires up. Until it does,
-# `appVersion` names the image tag PR B will publish and that tag does not exist
-# yet — see docs/src/how-to/install-with-helm.md.
-version: 0.1.0
-appVersion: "0.1.0"
+# 0.0.0 means nothing has been released yet.
+version: 0.0.0 # x-release-please-version
+appVersion: "0.0.0" # x-release-please-version
 
 # ServiceMonitor and PrometheusRule are monitoring.coreos.com/v1. The chart does
 # not gate them on a capabilities check; see values.yaml under `metrics`.
