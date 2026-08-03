@@ -65,6 +65,29 @@ lint:
 check-deps:
     ./scripts/check-deps.sh
 
+# Assert the four places the version lives agree, and that each is still
+# annotated for release-please. Private for the same reason `check-deps` is;
+# `ci` calls it.
+[private]
+check-version:
+    @version=$(./scripts/release-version.py) && echo "just check-version: ${version}, everywhere."
+
+# actionlint over every workflow. A YAML or expression error in a release
+# workflow surfaces at the first tag, which is the worst possible moment.
+#
+# Not in `just ci`: actionlint is not part of a Rust toolchain, same class as
+# `check-rules` and `chart`. `just pre-push` reaches it and it has its own CI job.
+[private]
+check-workflows:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v actionlint >/dev/null 2>&1; then
+        echo "error: actionlint is not installed — https://github.com/rhysd/actionlint" >&2
+        echo "       go install github.com/rhysd/actionlint/cmd/actionlint@latest" >&2
+        exit 1
+    fi
+    actionlint
+
 # ---------------------------------------------------------------------------
 # Testing
 # ---------------------------------------------------------------------------
@@ -359,8 +382,8 @@ e2e: check-engine
 # `image`, `e2e` and `check-rules` — and a fourth needs helm, which is `chart`.
 # `just pre-push` is the full local equivalent.
 #
-# The fast half of CI: lint, tests + the coverage gate, docs, licences.
-ci: lint test docs
+# The fast half of CI: lint, the version check, tests + the coverage gate, docs, licences.
+ci: lint check-version test docs
     cargo deny check
     @echo
     @echo "just ci: all checks passed. This is not all of CI — see 'just pre-push'."
@@ -379,9 +402,9 @@ ci: lint test docs
 # 1.94 toolchain installed. Run those two by hand — `just up && just test-pg` —
 # when you touch the store or reach for a newer language feature.
 #
-# Everything CI runs that one machine can: `ci` plus the chart and the three
-# container jobs.
-pre-push: check-engine check-rules chart ci image e2e
+# Everything CI runs that one machine can: `ci` plus the workflow lint, the chart
+# and the three container jobs.
+pre-push: check-engine check-workflows check-rules chart ci image e2e
     @echo
-    @echo "just pre-push: rules + chart + ci + image + e2e all passed."
+    @echo "just pre-push: workflows + rules + chart + ci + image + e2e all passed."
     @echo "Not covered here: 'just test-pg' (needs 'just up') and the MSRV job."

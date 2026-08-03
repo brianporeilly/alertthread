@@ -58,18 +58,45 @@ RUN cargo chef prepare --recipe-path recipe.json
 # ---------------------------------------------------------------------------
 FROM chef AS builder
 
-ARG TARGET=x86_64-unknown-linux-musl
+# Set by BuildKit and by buildah from --platform. Every build here is native —
+# the arm64 image is built on an arm64 runner — so this names the host's own
+# musl target, never a cross-compilation one.
+ARG TARGETARCH
+
+# `uname -m` is the fallback for a builder that does not set TARGETARCH.
+# Defaulting to amd64 instead would silently produce an x86_64 binary on an
+# arm64 host, which is the failure this file cannot afford to guess at.
+RUN set -eu; \
+    arch="${TARGETARCH:-}"; \
+    if [ -z "$arch" ]; then \
+        case "$(uname -m)" in \
+            x86_64) arch=amd64 ;; \
+            aarch64) arch=arm64 ;; \
+            *) echo "cannot derive a musl target from $(uname -m)" >&2; exit 1 ;; \
+        esac; \
+    fi; \
+    case "$arch" in \
+        amd64) target=x86_64-unknown-linux-musl ;; \
+        arm64) target=aarch64-unknown-linux-musl ;; \
+        *) echo "unsupported TARGETARCH=${arch}" >&2; exit 1 ;; \
+    esac; \
+    rustc --print target-list | grep -qx "$target" || { \
+        echo "the pinned builder does not know the target ${target}" >&2; exit 1; \
+    }; \
+    echo "$target" > /build/.target; \
+    echo "building for $target"
 
 # Cooking the recipe compiles only dependencies. This layer is cached unless
 # the dependency set itself changes, which is the entire point: with sqlx,
 # axum and reqwest in the tree, the difference between a cached and an
 # uncached rebuild is roughly ten seconds versus two minutes.
 COPY --from=planner /build/recipe.json recipe.json
-RUN cargo chef cook --release --target ${TARGET} --recipe-path recipe.json
+RUN cargo chef cook --release --target "$(cat /build/.target)" --recipe-path recipe.json
 
 COPY . .
-RUN cargo build --release --target ${TARGET} --package alertthread --bin alertthread \
-    && cp target/${TARGET}/release/alertthread /build/alertthread
+RUN target="$(cat /build/.target)" \
+    && cargo build --release --target "${target}" --package alertthread --bin alertthread \
+    && cp "target/${target}/release/alertthread" /build/alertthread
 
 # scratch has no trust store, and reqwest's rustls feature resolves roots
 # through rustls-platform-verifier — which fails at Client::builder().build(),
@@ -81,7 +108,7 @@ RUN apk add --no-cache ca-certificates
 # ---------------------------------------------------------------------------
 FROM scratch AS runtime
 
-# ~180 KB, and the reason the image is 6.02 MB rather than 5.84 MB.
+# 179 KB, and the whole difference between the binary and the image.
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /build/alertthread /alertthread
 

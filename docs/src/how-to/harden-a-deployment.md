@@ -292,3 +292,6 @@ compose stack has its own copy of the settings.
 - [Configuration](../reference/configuration.md) — `server.auth_token` and `server.auth_token_file`
 - [HTTP API](../reference/http-api.md) — the status codes, including the `401`
 - [Build and packaging](../explanation/build-and-packaging.md) — what the `scratch` image contains
+- [Verify artefacts](verify-artifacts.md) — check the signature before you run the image, and
+  enforce it on admission
+- [The supply chain](../explanation/supply-chain.md) — what that signature does and does not prove

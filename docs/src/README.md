@@ -30,7 +30,11 @@ rewritten.
 
 ## Project status
 
-Under construction, following the phased plan in `ROADMAP.md`. Phase 0 (foundations) is
-complete: the workspace, gates, CI and packaging are in place, and the musl/`scratch` build
-is [validated and measured](explanation/build-and-packaging.md). The relay itself is not
-implemented yet.
+**Pre-release. Nothing has been published.** The relay is built, hardened and tested
+end-to-end, the [Helm chart](how-to/install-with-helm.md) renders and is asserted on, and the
+release pipeline is in place and has never run. Install from a git checkout until `v0.1.0` is
+tagged: the image tag and the `oci://` chart reference in these docs do not resolve yet.
+
+[Published artefacts](reference/published-artifacts.md) is what a release will produce, and
+[Verify artefacts](how-to/verify-artifacts.md) is how to check it. `ROADMAP.md` in the
+repository is the phase plan and carries the open items.

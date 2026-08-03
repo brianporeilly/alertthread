@@ -1,0 +1,411 @@
+name: Release
+
+# Publishes the image, its signature and attestations, and the chart.
+#
+# It runs on a published release and nowhere else. Merging to `main` cannot
+# reach it: `release-please.yml` only opens a pull request, and merging that
+# pull request is what creates the release. `workflow_dispatch` defaults to a
+# dry run that builds and packages everything and pushes nothing.
+#
+# Both architectures are built natively — arm64 on an arm64 runner, not under
+# QEMU. The Dockerfile builds a *native* musl binary on Alpine, and emulated
+# rustc is slow enough to make the job unusable.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build, package and verify everything; push nothing."
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.release.tag_name || github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+  CHART_REGISTRY: ghcr.io/${{ github.repository_owner }}/charts
+
+jobs:
+  preflight:
+    name: version and mode
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      push: ${{ steps.mode.outputs.push }}
+      builder_base: ${{ steps.base.outputs.ref }}
+      builder_digest: ${{ steps.base.outputs.digest }}
+      toolchain: ${{ steps.base.outputs.toolchain }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      # A tag whose version is not the one in the tree publishes a chart whose
+      # appVersion names an image tag nothing pushed. This is the gate that
+      # stops that, and it runs before anything is built.
+      - name: Resolve and check the version
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          tag="${RELEASE_TAG}"
+          if [ -z "${tag}" ] && [ "${REF#refs/tags/}" != "${REF}" ]; then
+            tag="${REF_NAME}"
+          fi
+          if [ -n "${tag}" ]; then
+            version="$(./scripts/release-version.py --check "${tag}")"
+          else
+            version="$(./scripts/release-version.py)"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Releasing ${version}"
+
+      - name: Decide whether anything is pushed
+        id: mode
+        env:
+          EVENT: ${{ github.event_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          REF: ${{ github.ref }}
+        run: |
+          push=false
+          if [ "${EVENT}" = "release" ]; then
+            push=true
+          elif [ "${DRY_RUN}" = "false" ]; then
+            # A manual publish is the recovery path for a tag whose release event
+            # never fired. It is still only allowed to publish a tag: dispatching
+            # this from a branch would push whatever version the branch happens to
+            # carry, under a name somebody will later expect to be immutable.
+            case "${REF}" in
+              refs/tags/v*) push=true ;;
+              *)
+                echo "dry_run=false is only allowed on a v* tag; this ran on ${REF}" >&2
+                exit 1
+                ;;
+            esac
+          fi
+          echo "push=${push}" >> "$GITHUB_OUTPUT"
+          if [ "${push}" = "true" ]; then
+            echo "::notice::This run PUSHES to ghcr.io."
+          else
+            echo "::notice::Dry run — nothing will be pushed."
+          fi
+
+      # The builder base is read out of the Dockerfile rather than duplicated
+      # here, so the attestation cannot claim a base the build did not use.
+      - name: Read the pinned builder base
+        id: base
+        run: |
+          toolchain="$(sed -n 's/^ARG RUST_TOOLCHAIN=//p' Dockerfile)"
+          alpine="$(sed -n 's/^ARG ALPINE_VERSION=//p' Dockerfile)"
+          digest="$(sed -n 's/^ARG RUST_ALPINE_DIGEST=//p' Dockerfile)"
+          for v in "$toolchain" "$alpine" "$digest"; do
+            if [ -z "$v" ]; then
+              echo "could not read the builder base pins out of Dockerfile" >&2
+              exit 1
+            fi
+          done
+          {
+            echo "toolchain=${toolchain}"
+            echo "digest=${digest}"
+            echo "ref=docker.io/library/rust:${toolchain}-alpine${alpine}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Confirm the pinned digest is a multi-arch index
+        env:
+          REF: docker.io/library/rust
+          DIGEST: ${{ steps.base.outputs.digest }}
+        run: |
+          docker buildx imagetools inspect "${REF}@${DIGEST}" --raw > index.json
+          jq -e '.manifests | map(.platform.architecture) | index("amd64") and index("arm64")' index.json \
+            || { echo "the pinned builder digest does not carry both architectures" >&2; exit 1; }
+
+  build:
+    name: image (${{ matrix.arch }})
+    needs: preflight
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            # A native arm64 runner. Under QEMU this job compiles the whole
+            # dependency tree emulated, which is not a cost the PR path or the
+            # release path can carry.
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to ghcr.io
+        if: needs.preflight.outputs.push == 'true'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Pushed by digest, without a tag: the tag is claimed once, by the
+      # manifest list the next job assembles out of both architectures.
+      #
+      # provenance: false because buildx's own attestation manifest turns the
+      # pushed digest into an index, which `imagetools create` then cannot
+      # combine. Provenance is attached with cosign in `publish` instead.
+      - name: Build and push by digest
+        id: build
+        if: needs.preflight.outputs.push == 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          provenance: false
+          sbom: false
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=release-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=release-${{ matrix.arch }}
+
+      # The dry-run path builds the same Dockerfile for the same platform and
+      # runs the binary, which is the half that can be proven without a
+      # registry.
+      - name: Build and smoke-test without pushing
+        if: needs.preflight.outputs.push != 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          provenance: false
+          sbom: false
+          load: true
+          tags: localhost/alertthread:dryrun
+          cache-from: type=gha,scope=release-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=release-${{ matrix.arch }}
+
+      - name: Smoke-test the built image
+        if: needs.preflight.outputs.push != 'true'
+        run: |
+          docker run --rm localhost/alertthread:dryrun --version
+          if docker run --rm localhost/alertthread:dryrun 2>/dev/null; then
+            echo "expected the relay to refuse to start with no token" >&2
+            exit 1
+          fi
+          docker image inspect localhost/alertthread:dryrun \
+            --format 'arch={{.Architecture}} user={{.Config.User}} size={{.Size}}'
+
+      - name: Record the digest
+        if: needs.preflight.outputs.push == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - name: Upload the digest
+        if: needs.preflight.outputs.push == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: manifest, signatures, attestations, chart
+    needs: [preflight, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      # Keyless signing. cosign exchanges this for a short-lived Fulcio
+      # certificate bound to the workflow identity; there is no private key
+      # anywhere in this repository or its secrets.
+      id-token: write
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+      PUSH: ${{ needs.preflight.outputs.push }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      - uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
+
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+
+      - name: Log in to ghcr.io
+        if: env.PUSH == 'true'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download the per-architecture digests
+        if: env.PUSH == 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Assemble the manifest list
+        id: manifest
+        if: env.PUSH == 'true'
+        run: |
+          refs=()
+          for d in /tmp/digests/*; do
+            refs+=("${IMAGE}@sha256:$(basename "$d")")
+          done
+          if [ "${#refs[@]}" -ne 2 ]; then
+            echo "expected 2 per-architecture digests, got ${#refs[@]}" >&2
+            exit 1
+          fi
+          docker buildx imagetools create --tag "${IMAGE}:${VERSION}" "${refs[@]}"
+          digest="$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" \
+            --format '{{json .Manifest}}' | jq -r .digest)"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "::notice::Published ${IMAGE}:${VERSION} at ${digest}"
+
+      # The image is a scratch base with one static binary in it, so scanning
+      # the image finds nothing to catalogue — no package database, no
+      # manifests. Cargo.lock is where the dependency inventory actually is.
+      # It is the whole workspace's locked graph, which is a superset of what is
+      # linked into the shipped binary; ROADMAP known open item 28 carries the
+      # narrower answer and why it is not free.
+      - name: Generate the SBOM
+        run: |
+          syft scan file:Cargo.lock \
+            -o spdx-json=sbom.spdx.json \
+            --source-name alertthread \
+            --source-version "${VERSION}"
+          jq -e '.packages | length > 100' sbom.spdx.json > /dev/null \
+            || { echo "the SBOM catalogued almost nothing — syft did not read Cargo.lock" >&2; exit 1; }
+          echo "SBOM: $(jq '.packages | length' sbom.spdx.json) packages"
+
+      # The builder base is unsigned and carries no provenance of its own
+      # (ROADMAP known open item 24). Attesting which base a release was built
+      # on does not fix that, but it makes it checkable instead of invisible.
+      - name: Generate the build-inputs predicate
+        env:
+          BUILDER_BASE: ${{ needs.preflight.outputs.builder_base }}
+          BUILDER_DIGEST: ${{ needs.preflight.outputs.builder_digest }}
+          TOOLCHAIN: ${{ needs.preflight.outputs.toolchain }}
+          REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          jq -n \
+            --arg base "$BUILDER_BASE" \
+            --arg baseDigest "$BUILDER_DIGEST" \
+            --arg toolchain "$TOOLCHAIN" \
+            --arg repository "$REPOSITORY_URL" \
+            --arg revision "$GITHUB_SHA" \
+            --arg version "$VERSION" \
+            --arg workflow "$WORKFLOW_REF" \
+            '{
+              version: $version,
+              source: { repository: $repository, revision: $revision, workflow: $workflow },
+              builderBase: {
+                image: $base,
+                digest: $baseDigest,
+                attested: false,
+                note: "Upstream image. Unsigned, no provenance, no SBOM of its own. Pinned by digest only."
+              },
+              rustToolchain: $toolchain,
+              runtimeBase: "scratch",
+              platforms: ["linux/amd64", "linux/arm64"],
+              nativeBuild: true
+            }' > build-inputs.json
+          cat build-inputs.json
+
+      - name: Sign the image
+        if: env.PUSH == 'true'
+        env:
+          REF: ${{ env.IMAGE }}@${{ steps.manifest.outputs.digest }}
+        run: cosign sign --yes "${REF}"
+
+      - name: Attest the SBOM
+        if: env.PUSH == 'true'
+        env:
+          REF: ${{ env.IMAGE }}@${{ steps.manifest.outputs.digest }}
+        run: cosign attest --yes --type spdxjson --predicate sbom.spdx.json "${REF}"
+
+      - name: Attest the build inputs
+        if: env.PUSH == 'true'
+        env:
+          REF: ${{ env.IMAGE }}@${{ steps.manifest.outputs.digest }}
+        run: |
+          cosign attest --yes \
+            --type https://alertthread.dev/attestations/build-inputs/v1 \
+            --predicate build-inputs.json "${REF}"
+
+      # Packaging is exercised on a dry run too; only the push is skipped.
+      - name: Package the chart
+        run: |
+          helm package charts/alertthread --destination dist
+          ls -l "dist/alertthread-${VERSION}.tgz"
+
+      - name: Push and sign the chart
+        if: env.PUSH == 'true'
+        env:
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          helm registry login ghcr.io \
+            --username "${REGISTRY_USER}" \
+            --password "${REGISTRY_TOKEN}"
+          helm push "dist/alertthread-${VERSION}.tgz" "oci://${CHART_REGISTRY}" 2>&1 | tee push.log
+          digest="$(sed -n 's/^Digest: //p' push.log)"
+          if [ -z "$digest" ]; then
+            echo "helm push printed no digest, so there is nothing to sign" >&2
+            exit 1
+          fi
+          cosign sign --yes "${CHART_REGISTRY}/alertthread@${digest}"
+          echo "::notice::Published oci://${CHART_REGISTRY}/alertthread:${VERSION} at ${digest}"
+
+      # The SBOM is attached to the image as an attestation and to the release
+      # as a file. The attestation is what a cluster admission policy checks;
+      # the file is what a human downloads without a registry credential.
+      - name: Attach the artefacts to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release upload "${TAG}" \
+            sbom.spdx.json \
+            build-inputs.json \
+            "dist/alertthread-${VERSION}.tgz" \
+            --clobber
+
+      - name: Summary
+        env:
+          DIGEST: ${{ steps.manifest.outputs.digest }}
+        run: |
+          {
+            echo "## alertthread ${VERSION}"
+            echo
+            if [ "${PUSH}" = "true" ]; then
+              echo "| Artefact | Reference |"
+              echo "|---|---|"
+              echo "| Image | \`${IMAGE}:${VERSION}\` |"
+              echo "| Digest | \`${DIGEST}\` |"
+              echo "| Chart | \`oci://${CHART_REGISTRY}/alertthread:${VERSION}\` |"
+              echo
+              echo "Verify: see \`docs/src/how-to/verify-artifacts.md\`."
+            else
+              echo "Dry run. Both architectures built and smoke-tested, the SBOM"
+              echo "and the build-inputs predicate generated, the chart packaged."
+              echo "Nothing was pushed, signed or attested."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

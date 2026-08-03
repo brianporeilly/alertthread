@@ -167,6 +167,20 @@ jobs:
       - run: python3 -m pip install --user pyyaml
       - run: just chart
 
+  workflows:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: extractions/setup-just@v3
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: actionlint
+      # The release workflow's first real exercise is the first tag. A YAML or
+      # expression error in it would surface there, which is the worst possible
+      # moment, so it is linted on every pull request instead.
+      - run: just check-workflows
+
   image:
     name: scratch image builds and runs
     runs-on: ubuntu-latest
@@ -198,7 +212,7 @@ jobs:
   ci-success:
     name: CI
     if: always()
-    needs: [lint, test, test-pg, deny, msrv, docs, rules, chart, image, e2e]
+    needs: [lint, test, test-pg, deny, msrv, docs, rules, chart, workflows, image, e2e]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any job failed

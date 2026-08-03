@@ -1,0 +1,40 @@
+name: Release please
+
+# Maintains a release pull request: the changelog, the version in the four
+# places `scripts/release-version.py` checks, and the manifest. Merging that
+# pull request is what creates the tag and the GitHub release, and that is a
+# deliberate human action — nothing here publishes anything.
+#
+# The token matters. A tag or release created with the default GITHUB_TOKEN
+# does not start another workflow run, so `release.yml` would never fire and the
+# tag would exist with nothing published. RELEASE_PLEASE_TOKEN — a fine-grained
+# PAT with contents:write and pull-requests:write — is what makes the release
+# event reach `release.yml`. Without it the tag is still created and nothing is
+# published, which is the safe direction to fail; `release.yml` can then be run
+# by hand against the tag.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: release pull request
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

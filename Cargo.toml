@@ -3,7 +3,9 @@ resolver = "3"
 members = ["crates/core", "crates/store", "crates/slack", "crates/app", "dev/slack-mock"]
 
 [workspace.package]
-version = "0.0.0"
+# release-please rewrites every line below carrying the marker. Do not edit them
+# by hand; `just check-version` fails when they disagree with Chart.yaml.
+version = "0.0.0" # x-release-please-version
 edition = "2024"
 rust-version = "1.94"
 license = "MIT OR Apache-2.0"
@@ -17,9 +19,9 @@ authors = ["alertthread contributors"]
 [workspace.dependencies]
 # `version` alongside `path` is required for these to be publishable later, and
 # cargo-deny cannot resolve a path-only workspace dependency without it.
-alertthread-core = { path = "crates/core", version = "0.0.0" }
-alertthread-slack = { path = "crates/slack", version = "0.0.0" }
-alertthread-store = { path = "crates/store", version = "0.0.0" }
+alertthread-core = { path = "crates/core", version = "0.0.0" } # x-release-please-version
+alertthread-slack = { path = "crates/slack", version = "0.0.0" } # x-release-please-version
+alertthread-store = { path = "crates/store", version = "0.0.0" } # x-release-please-version
 
 anyhow = "1.0"
 axum = "0.8"

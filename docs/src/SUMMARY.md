@@ -13,6 +13,7 @@
 - [Customize message templates](how-to/customize-templates.md)
 - [Harden a deployment](how-to/harden-a-deployment.md)
 - [Alert on the relay](how-to/alert-on-the-relay.md)
+- [Verify artefacts](how-to/verify-artifacts.md)
 - [Troubleshoot](how-to/troubleshoot.md)
 
 # Reference
@@ -22,10 +23,12 @@
 - [HTTP API](reference/http-api.md)
 - [Slack errors](reference/slack-errors.md)
 - [Metrics](reference/metrics.md)
+- [Published artefacts](reference/published-artifacts.md)
 
 # Explanation
 
 - [Build and packaging](explanation/build-and-packaging.md)
+- [The supply chain](explanation/supply-chain.md)
 - [Fingerprint correlation](explanation/fingerprint-correlation.md)
 - [Why an outbox](explanation/why-outbox.md)
 - [Failure semantics](explanation/failure-semantics.md)
