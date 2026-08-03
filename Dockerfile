@@ -11,14 +11,32 @@
 # cross-toolchain because Alpine's *native* target is already musl. Nothing is
 # cross-compiled, so libsqlite3-sys builds with a plain native cc and the whole
 # category of cross-compilation problems does not arise.
+#
+# Moving this base to Project Hummingbird was spiked and did not work: no
+# Hummingbird stream ships a Rust `x86_64-unknown-linux-musl` std. ROADMAP
+# known open item 24 records what was tried and what would reopen it.
 
-ARG RUST_VERSION=1.97.1
+# Not RUST_VERSION: the base image exports that name itself, so an assertion
+# reading it compares the image against its own declaration and can never fail.
+ARG RUST_TOOLCHAIN=1.97.1
 ARG ALPINE_VERSION=3.22
+
+# The digest is what gets pulled. The tag beside it is decorative — a stale one
+# resolves silently to whatever the digest names — so bump the two together.
+ARG RUST_ALPINE_DIGEST=sha256:df4efa4e0cdfb5245fa06e3f431387b2bcc96782ce5681b7fb6b0297d745bc29
 
 # ---------------------------------------------------------------------------
 # chef — build toolchain, shared by the planner and builder stages
 # ---------------------------------------------------------------------------
-FROM docker.io/library/rust:${RUST_VERSION}-alpine${ALPINE_VERSION} AS chef
+FROM docker.io/library/rust:${RUST_TOOLCHAIN}-alpine${ALPINE_VERSION}@${RUST_ALPINE_DIGEST} AS chef
+
+ARG RUST_TOOLCHAIN
+
+RUN rustc --version | grep -qF "rustc ${RUST_TOOLCHAIN} " || { \
+        echo "RUST_TOOLCHAIN=${RUST_TOOLCHAIN} but the pinned digest carries $(rustc --version)" >&2; \
+        echo "update RUST_ALPINE_DIGEST and RUST_TOOLCHAIN together" >&2; \
+        exit 1; \
+    }
 
 # musl-dev: libc headers for libsqlite3-sys.
 # cmake/make/g++: rustls' default aws-lc-rs provider compiles C.
