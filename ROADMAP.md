@@ -757,8 +757,11 @@ a `/still-firing` slash command.
     `ALERTTHREAD_LOG_FORMAT` match that treats an unrecognised value the same way — both cheap
     once somebody is already in that function, and neither worth a PR of its own.
 
-24. **The builder base should move to Project Hummingbird; the runtime stays `scratch`.**
-    Decided in review on 2026-08-02. [Hummingbird](https://hummingbird-project.io/docs/using/overview/)
+24. **The builder base cannot move to Project Hummingbird. It is pinned by digest instead;
+    the runtime stays `scratch`.** Spiked and settled on 2026-08-02 — outcome 3 of the three
+    below. The reasoning that sent us looking is preserved; the spike result follows it.
+
+    [Hummingbird](https://hummingbird-project.io/docs/using/overview/)
     is Red Hat's minimal-hardened-image project: distroless by default, non-root, hermetic
     builds, cosign-verified signatures, SLSA provenance, SBOMs, and FIPS variants.
 
@@ -793,6 +796,108 @@ a `/still-firing` slash command.
     would reopen it is a FIPS requirement: a static musl binary with `rustls` cannot be
     FIPS-validated, and Hummingbird's FIPS variants are the reason that would matter. Written down
     now so it is not rediscovered under compliance pressure.
+
+    ### What the spike found
+
+    **A Hummingbird Rust image exists — the documentation is wrong about that.** The "using"
+    page lists no Rust image and its multi-stage example is Go, but the registries carry one,
+    at the exact version this project already pins:
+
+    | Path | Exists | Notes |
+    |---|---|---|
+    | `registry.access.redhat.com/hi/rust:1.97.1-builder` | **yes** | `sha256:5f9ce5a9651e…827d`, `vendor=Red Hat, Inc.`, multi-arch amd64+arm64 |
+    | `quay.io/hummingbird/rust:1.97.1-builder` | **yes** | identical digest — a true mirror, not a rebuild |
+    | `quay.io/hummingbird-rawhide/rust:1.97.1-builder` | yes | plain Fedora repos, *not* a hardened stream |
+    | `quay.io/hummingbird-community/rust` | **no** | namespace has 19 repos, no Rust |
+    | `quay.io/hummingbird-ci/rust` | **no** | build infrastructure only |
+
+    The builder variant is a real toolchain: `dnf`, `rpm`, `bash`, `gcc`, `make`, `pkg-config`,
+    and `rustc 1.97.1 (Fedora 1.97.1-2.hum1)` — the same upstream version as `rust:alpine`.
+    `cmake`, `gcc-c++`, `clang` and `perl` all install from its repo, so `aws-lc-rs` and
+    `libsqlite3-sys` would have had what they need.
+
+    **It fails on exactly one thing: there is no Rust musl standard library, anywhere.**
+
+    - `dnf list rust-std-static-*` offers `x86_64-unknown-none`, `x86_64-unknown-uefi`,
+      `wasm32-*`, `*-pc-windows-gnu` and `aarch64-unknown-none-softfloat`. **No
+      `x86_64-unknown-linux-musl`.** `dnf install` of that name: `No match for argument`.
+    - `dnf search musl` in the supported repo: `No matches found`. No `musl-gcc`, no
+      `musl-libc`, no `musl-devel`, and nothing `Provides` them.
+    - Proven by building, not by reading the package list: a hello-world
+      `cargo build --target x86_64-unknown-linux-musl` in the image fails with
+      `error[E0463]: can't find crate for std` — "the `x86_64-unknown-linux-musl` target may
+      not be installed".
+    - The rawhide stream *does* carry `musl-gcc`, `musl-devel` and `musl-libc-static` — it is
+      wired to plain `fedora`/`updates` repos — but **still no Rust musl std**, because Fedora
+      does not package one either. It is also not a hardened stream, so it would trade the
+      provenance we came for against a rolling development base.
+    - `-Z build-std` is closed: `rust-src` is available, but the toolchain is stable and
+      `-Z` is nightly-only (`the -Z flag is only accepted on the nightly channel`).
+    - `rustup` is absent, and installing it would pull an unsigned toolchain from
+      `static.rust-lang.org` into the hardened image — which defeats the entire reason for
+      moving, so it is not a fallback.
+
+    **Outcome 2 was considered and rejected as ceremony.** The only stages Hummingbird could
+    serve are the `planner` (whose output is `recipe.json`, a text manifest contributing zero
+    bytes to the artefact) and the CA-bundle source (180 KB of the shipped image). Neither
+    moves the weakest link, which is the *compiler*; both add a ~950 MB base image to every
+    build and a second `cargo install cargo-chef` compile. Improving the trust store while the
+    thing that decides the binary's contents is unchanged is optimising the visible small half.
+
+    **So: outcome 3.** `rust:1.97.1-alpine3.22` is retained and pinned to
+    `sha256:df4efa4e0cdfb5245fa06e3f431387b2bcc96782ce5681b7fb6b0297d745bc29` (a multi-arch
+    index, so PR B2's arm64 work is not foreclosed). **The builder base is still the weakest
+    link and PR B's signatures do not change that** — they attest what we built, not what we
+    built it on.
+
+    The shipped artefact did not move: binary `8 659 056` bytes, sha256 `b1411e4a…b90f`,
+    `static-pie linked`, `ldd` → `statically linked`, image `8.85 MB`, `USER 65532:65532`,
+    runs `--version` from `scratch`. Baseline and pinned builds produced the **same podman
+    image ID** (`13bdd7158ec1`) and byte-identical binary and CA bundle.
+
+    **Re-check trigger:** a `rust-std-static-x86_64-unknown-linux-musl` package appearing in
+    the Hummingbird repo, or Hummingbird publishing a musl-target Rust builder. Both are the
+    single blocker; everything else was already in place. Nothing else about this needs
+    re-deriving.
+
+25. **A digest pin makes the version tag decorative, and the obvious guard against that is
+    tautological.** Found while implementing item 24, in both directions, by watching it.
+
+    `FROM …/rust:${RUST_TOOLCHAIN}-alpine${ALPINE_VERSION}@${RUST_ALPINE_DIGEST}` resolves on
+    the **digest**; the tag is ignored. Building with the tag deliberately set to
+    `1.94-alpine` and the 1.97.1 digest succeeds and yields `rustc 1.97.1`. So bumping the
+    version in `Dockerfile` without bumping the digest is a silent no-op — precisely the
+    "a setting somebody believes is in effect and is not" failure this project legislates
+    against elsewhere. `Dockerfile`'s chef stage now asserts `rustc --version` matches.
+
+    **The first version of that assertion could never fail, and only testing it revealed
+    why.** It was written against `ARG RUST_VERSION` — but `docker.io/library/rust` exports
+    `ENV RUST_VERSION=1.97.1` itself, and a bare in-stage `ARG` of a name the base image
+    already sets resolves to *the inherited ENV*, not to the global `ARG` default. The check
+    therefore compared the image's `rustc` against the image's own declaration of its version
+    and passed unconditionally. Editing the global default to `1.96.0` still printed
+    `1.97.1`. Renaming the arg to `RUST_TOOLCHAIN`, which the base image does not set, fixed
+    it; the drifted build now fails by name, and the correct one still passes.
+
+    **A related buildah quirk, worth knowing before trusting a `--build-arg` override:**
+    `podman build --build-arg RUST_VERSION=1.96.0` applied the override to the `FROM` line
+    while the in-stage `ARG` of the same name did *not* see it. A build arg can therefore be
+    live in one part of a Dockerfile and ignored a few lines later. Do not assume an override
+    took effect without echoing it.
+
+26. **The build-and-packaging size figures are Phase 0 projections and have been overtaken.**
+    `docs/src/explanation/build-and-packaging.md` states **6.02 MB** as "the number to
+    compare against" and notes "roughly 2 MB of headroom before the published figure is"
+    exceeded. Measured on `main` at the time of item 24's spike: binary **8 659 056 bytes**,
+    image **8.85 MB**. The headroom is gone and ADR 001's "~8 MB static binary" is now
+    slightly exceeded rather than conservative.
+
+    Nothing is wrong — the projection was made in Phase 0 against crates that had no
+    dependencies yet, and the page says so. But the page currently reads as a measurement of
+    the shipped artefact and is not one, and the ADR's estimate is quoted elsewhere. **Not
+    fixed here** because item 24's PR is a build-provenance change and re-measuring the
+    packaging docs is a separate edit with its own review. Worth doing the next time anything
+    touches that page, and worth a fresh measurement rather than a patched number.
 
 ## Process notes worth keeping
 
