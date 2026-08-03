@@ -15,7 +15,7 @@ use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 
 use crate::auth::WebhookAuth;
-use crate::config::Config;
+use crate::config::{Config, ENV_CONFIG, ENV_LOG, ENV_LOG_FORMAT};
 use crate::http::{AppState, router};
 use crate::metrics::Metrics;
 use crate::ratelimit::SlackLimits;
@@ -388,36 +388,64 @@ pub async fn signal() -> anyhow::Result<()> {
 
 /// Where the configuration file lives, when there is one.
 ///
-/// The command line wins, then `ALERTTHREAD_CONFIG`, then nothing — which is the ordinary
-/// container case, where everything comes from the environment and shipping an empty file in
-/// the image to satisfy a required argument would be worse.
+/// The command line wins, then [`ENV_CONFIG`], then nothing — which is the ordinary container
+/// case, where everything comes from the environment and shipping an empty file in the image
+/// to satisfy a required argument would be worse.
 ///
 /// Which argument `given` came from is [`crate::cli`]'s problem: the relay takes it
 /// positionally and `alertthread replay` takes `--config`, and both resolve here so the
 /// subcommand cannot drift onto a different store from the server's.
 #[must_use]
 pub fn config_path(given: Option<std::path::PathBuf>) -> Option<std::path::PathBuf> {
-    given.or_else(|| {
-        std::env::var("ALERTTHREAD_CONFIG")
-            .ok()
-            .map(std::path::PathBuf::from)
-    })
+    given.or_else(|| std::env::var(ENV_CONFIG).ok().map(std::path::PathBuf::from))
+}
+
+/// The variables that set the log filter, in the order they are consulted.
+///
+/// `RUST_LOG` needs no reservation in [`crate::config`]: it carries no `ALERTTHREAD_` prefix,
+/// so the configuration layer never sees it.
+pub const LOG_FILTER_VARS: [&str; 2] = [ENV_LOG, "RUST_LOG"];
+
+/// The filter used when no variable supplies a usable one.
+pub const DEFAULT_LOG_FILTER: &str = "info,alertthread=info";
+
+/// Picks the env-filter directive from [`LOG_FILTER_VARS`], falling back to
+/// [`DEFAULT_LOG_FILTER`].
+///
+/// Takes a lookup instead of reading the environment because [`init_tracing`] installs a
+/// process-global subscriber and therefore cannot be called twice; this half can.
+///
+/// A variable that is set but does not parse is skipped rather than fatal, and the next one
+/// is tried. Refusing to start over a malformed log filter would trade the whole relay for a
+/// typo in a directive.
+fn log_filter<F>(lookup: F) -> tracing_subscriber::EnvFilter
+where
+    F: Fn(&str) -> Option<String>,
+{
+    use tracing_subscriber::EnvFilter;
+
+    LOG_FILTER_VARS
+        .iter()
+        .filter_map(|name| lookup(name))
+        .find_map(|directive| EnvFilter::try_new(directive).ok())
+        .unwrap_or_else(|| EnvFilter::new(DEFAULT_LOG_FILTER))
 }
 
 /// Sets up structured logging.
 ///
-/// JSON to stdout when `ALERTTHREAD_LOG_FORMAT=json`, human-readable otherwise. JSON is not
+/// JSON to stdout when [`ENV_LOG_FORMAT`] is `json`, human-readable otherwise. JSON is not
 /// the default because the first thing anybody does with this binary is run it in a terminal
 /// (PRD §6 asks for "clear, structured logging"; a wall of JSON in a terminal is structured
 /// and not clear).
+///
+/// The filter comes from [`log_filter`], which is where the precedence lives.
 pub fn init_tracing() {
-    use tracing_subscriber::{EnvFilter, fmt};
+    use tracing_subscriber::fmt;
 
-    let filter = EnvFilter::try_from_env("ALERTTHREAD_LOG")
-        .unwrap_or_else(|_| EnvFilter::new("info,alertthread=info"));
+    let filter = log_filter(|name| std::env::var(name).ok());
 
-    let json = std::env::var("ALERTTHREAD_LOG_FORMAT")
-        .is_ok_and(|format| format.eq_ignore_ascii_case("json"));
+    let json =
+        std::env::var(ENV_LOG_FORMAT).is_ok_and(|format| format.eq_ignore_ascii_case("json"));
 
     if json {
         fmt().json().with_env_filter(filter).init();
@@ -436,7 +464,10 @@ pub fn cancelled_token() -> CancelToken {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_renderer, cancelled_token, config_path, report_webhook_auth, worker_id};
+    use super::{
+        DEFAULT_LOG_FILTER, ENV_LOG, build_renderer, cancelled_token, config_path, log_filter,
+        report_webhook_auth, worker_id,
+    };
     use crate::auth::{WebhookAuth, WebhookToken};
     use crate::config::Config;
     use alertthread_core::Fingerprint;
@@ -590,10 +621,72 @@ slack:
     fn no_argument_and_no_environment_variable_means_no_file() {
         // Configuring purely through environment variables is the normal container case,
         // and requiring a file for it would mean shipping an empty one in the image.
-        if std::env::var("ALERTTHREAD_CONFIG").is_ok() {
+        if std::env::var(crate::config::ENV_CONFIG).is_ok() {
             return;
         }
         assert_eq!(config_path(None), None);
+    }
+
+    /// Reads from a fixed table instead of the process environment.
+    ///
+    /// `unsafe_code` is forbidden workspace-wide and `std::env::set_var` is unsafe, so a test
+    /// cannot arrange one; that is why [`log_filter`] takes a lookup. The variables really
+    /// being read is
+    /// [`crates/app/tests/environment.rs`](../../tests/environment.rs)'s job — it starts the
+    /// shipping binary with each one set.
+    fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let owned: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        move |name| {
+            owned
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        }
+    }
+
+    /// [`DEFAULT_LOG_FILTER`] as `EnvFilter` renders it, which reorders the directives.
+    fn default() -> String {
+        tracing_subscriber::EnvFilter::new(DEFAULT_LOG_FILTER).to_string()
+    }
+
+    #[test]
+    fn nothing_set_gets_the_default_filter() {
+        assert_eq!(log_filter(lookup(&[])).to_string(), default());
+    }
+
+    #[test]
+    fn rust_log_sets_the_filter_when_the_project_variable_is_unset() {
+        // The reason this exists: an operator with a quiet relay types RUST_LOG, because
+        // that is what every other Rust binary reads. A relay nobody can turn logging up on
+        // is the failure this whole change is about.
+        assert_eq!(
+            log_filter(lookup(&[("RUST_LOG", "debug")])).to_string(),
+            "debug"
+        );
+    }
+
+    #[test]
+    fn the_project_variable_wins_over_rust_log() {
+        // ALERTTHREAD_LOG is the documented name and the specific one. RUST_LOG is a
+        // fallback, not a peer: a container that inherits RUST_LOG from an image or a
+        // sidecar convention must not override what the deployment asked for by name.
+        let both = lookup(&[(ENV_LOG, "alertthread=trace"), ("RUST_LOG", "error")]);
+        assert_eq!(log_filter(both).to_string(), "alertthread=trace");
+    }
+
+    #[test]
+    fn a_directive_that_does_not_parse_falls_through_instead_of_stopping_the_relay() {
+        // Refusing to start over a malformed log filter would trade the relay for a typo.
+        // The next variable is tried, and then the default — so the worst case is logging at
+        // the level it would have had anyway, not silence.
+        let bad_first = lookup(&[(ENV_LOG, "=@!not a directive"), ("RUST_LOG", "warn")]);
+        assert_eq!(log_filter(bad_first).to_string(), "warn");
+
+        let all_bad = lookup(&[(ENV_LOG, "=@!"), ("RUST_LOG", "=@!")]);
+        assert_eq!(log_filter(all_bad).to_string(), default());
     }
 
     #[tokio::test]

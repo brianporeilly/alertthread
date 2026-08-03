@@ -52,6 +52,32 @@ pub const ENV_PREFIX: &str = "ALERTTHREAD_";
 /// The nesting separator inside an environment variable name.
 pub const ENV_SEPARATOR: &str = "__";
 
+/// `ALERTTHREAD_CONFIG` — the configuration file path. Read by [`crate::run::config_path`].
+pub const ENV_CONFIG: &str = "ALERTTHREAD_CONFIG";
+
+/// `ALERTTHREAD_LOG` — the `tracing` filter directive. Read by [`crate::run::init_tracing`].
+pub const ENV_LOG: &str = "ALERTTHREAD_LOG";
+
+/// `ALERTTHREAD_LOG_FORMAT` — `json` or human-readable. Read by [`crate::run::init_tracing`].
+pub const ENV_LOG_FORMAT: &str = "ALERTTHREAD_LOG_FORMAT";
+
+/// Every `ALERTTHREAD_*` name that is **not** a configuration key.
+///
+/// Each names something that has to be settable before the configuration exists: what to log
+/// while the file is being read, and which file that is. None of them can be a config key for
+/// that reason, and each is consumed by [`crate::run`] straight from the process environment.
+///
+/// [`Config::figment`] hands this list to the `Env` provider to skip. Without that, a name
+/// with no [`ENV_SEPARATOR`] in it parses as a *top-level* key — `ALERTTHREAD_LOG` as `log` —
+/// which [`Config`]'s `deny_unknown_fields` then rejects, and the relay refuses to start on a
+/// variable its own documentation told the operator to set.
+///
+/// Adding a name here is what makes it reserved. Two tests keep the list honest in opposite
+/// directions: `reserved_names_are_the_ones_that_would_collide` rejects a name that is not a
+/// collision, and `every_documented_bare_variable_is_reserved` fails when an operator-facing
+/// page names a bare variable this list does not carry.
+pub const RESERVED_ENV_VARS: [&str; 3] = [ENV_CONFIG, ENV_LOG, ENV_LOG_FORMAT];
+
 /// Everything the relay reads at startup.
 ///
 /// `Debug` is derived and is safe to log: the only secret is the bot token, and it is a
@@ -440,8 +466,16 @@ impl Config {
             // what makes that a decision rather than a behaviour somebody has to look up.
             figment = figment.merge(Yaml::file(path));
         }
+        // `ignore` matches the key the provider has produced so far, which after `prefixed`
+        // is the name with `ALERTTHREAD_` already stripped. Applied before `split` so the
+        // list can be written as the names an operator actually exports.
+        let reserved: Vec<&str> = RESERVED_ENV_VARS
+            .iter()
+            .map(|name| name.strip_prefix(ENV_PREFIX).unwrap_or(name))
+            .collect();
         figment.merge(
             Env::prefixed(ENV_PREFIX)
+                .ignore(&reserved)
                 .split(ENV_SEPARATOR)
                 .map(|key| key.as_str().to_lowercase().into()),
         )
@@ -777,7 +811,9 @@ pub const PROFILE: Profile = Profile::const_new("default");
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, ConfigError, parse_duration};
+    use super::{
+        Config, ConfigError, ENV_PREFIX, ENV_SEPARATOR, RESERVED_ENV_VARS, parse_duration,
+    };
     use alertthread_core::{ChannelId, PolicyError};
     use alertthread_slack::TemplateKind;
     use chrono::TimeDelta;
@@ -942,6 +978,131 @@ slack:
         let error = load(&format!("{MINIMAL}\ncollapse:\n  treshold: 9\n"))
             .expect_err("an unrecognised key must be named");
         assert!(error.to_string().contains("treshold"), "{error}");
+    }
+
+    #[test]
+    fn reserved_names_are_the_ones_that_would_collide() {
+        // Reserving a name that could never have been read as a config key would be
+        // meaningless; reserving one that *is* a config key would silently shadow it. Both
+        // are the same mistake in opposite directions, and both are caught here.
+        for name in RESERVED_ENV_VARS {
+            let suffix = name
+                .strip_prefix(ENV_PREFIX)
+                .unwrap_or_else(|| panic!("{name} is not an {ENV_PREFIX} variable at all"));
+            assert!(
+                !suffix.is_empty(),
+                "{name} is the bare prefix, which is not a variable"
+            );
+            assert!(
+                !suffix.contains(ENV_SEPARATOR),
+                "{name} contains {ENV_SEPARATOR}, so it names a nested configuration key — \
+                 reserving it would make that key unsettable from the environment"
+            );
+        }
+    }
+
+    #[test]
+    fn every_documented_bare_variable_is_reserved() {
+        // The bug this reserves against was not written, it was *documented*: three names
+        // reached `reference/configuration.md`, the chart and `compose.yaml` before anything
+        // booted the relay with one set. So the drift that matters is between what the
+        // operator-facing surfaces name and what `RESERVED_ENV_VARS` holds, and that is what
+        // fails here — not merely "the three we know about still work".
+        //
+        // A name with `__` in it is a nested configuration key and is fine by construction.
+        // A bare one is a top-level key, which `deny_unknown_fields` rejects, so it has to be
+        // reserved or it is this bug again.
+        let mut found: Vec<(String, String)> = Vec::new();
+        for surface in DOCUMENTED_SURFACES {
+            let path = repo_root().join(surface);
+            collect_env_names(&path, &mut found);
+        }
+        assert!(
+            !found.is_empty(),
+            "no {ENV_PREFIX} variable was found on any documented surface — the scan is \
+             looking in the wrong place and would pass regardless"
+        );
+
+        for (name, file) in found {
+            let Some(suffix) = name.strip_prefix(ENV_PREFIX) else {
+                continue;
+            };
+            if suffix.is_empty() || suffix.contains(ENV_SEPARATOR) {
+                continue;
+            }
+            if NOT_A_VARIABLE.contains(&name.as_str()) {
+                continue;
+            }
+            assert!(
+                RESERVED_ENV_VARS.contains(&name.as_str()),
+                "{file} documents {name}, which has no {ENV_SEPARATOR} in it and so parses \
+                 as a top-level configuration key that does not exist — the relay refuses to \
+                 start with it set. Add it to RESERVED_ENV_VARS (and read it in `run`), or \
+                 give it a nested name."
+            );
+        }
+    }
+
+    /// The surfaces that tell an operator what to export.
+    ///
+    /// `ROADMAP.md` and `crates/` are deliberately absent. The roadmap records this class of
+    /// bug by naming the variable that caused it, and the integration tests set a
+    /// deliberately unknown name to prove an unknown one is still fatal; both would trip the
+    /// check above for the wrong reason.
+    const DOCUMENTED_SURFACES: [&str; 7] = [
+        "docs/src",
+        "charts",
+        "deploy",
+        "dev",
+        "scripts",
+        "compose.yaml",
+        "README.md",
+    ];
+
+    /// Literals that appear in prose as an example of what *not* to write.
+    ///
+    /// `ALERTTHREAD_SLACK_DEFAULT_CHANNEL` is the ambiguity that
+    /// [`ENV_SEPARATOR`] exists to remove, and both the reference page and this module's own
+    /// documentation name it to make that point. Setting it is still fatal, which is correct.
+    const NOT_A_VARIABLE: [&str; 1] = ["ALERTTHREAD_SLACK_DEFAULT_CHANNEL"];
+
+    /// The workspace root, relative to this crate. Every surface above hangs off it.
+    fn repo_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    /// Appends every `ALERTTHREAD_*` literal in `path`, with the file it came from,
+    /// recursing into directories.
+    ///
+    /// Deliberately total: an unreadable path contributes nothing rather than failing, and
+    /// the caller asserts the whole scan found *something* — which is what catches a surface
+    /// that has moved, without making a stray unreadable file a test failure.
+    fn collect_env_names(path: &std::path::Path, found: &mut Vec<(String, String)>) {
+        if path.is_dir() {
+            let Ok(entries) = std::fs::read_dir(path) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                collect_env_names(&entry.path(), found);
+            }
+            return;
+        }
+        // Binary files (the docs carry images) simply have no names in them.
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let file = path.display().to_string();
+        for (offset, _) in text.match_indices(ENV_PREFIX) {
+            let Some(rest) = text.get(offset..) else {
+                continue;
+            };
+            let end = rest
+                .find(|c: char| !c.is_ascii_uppercase() && !c.is_ascii_digit() && c != '_')
+                .unwrap_or(rest.len());
+            if let Some(name) = rest.get(..end) {
+                found.push((name.to_owned(), file.clone()));
+            }
+        }
     }
 
     #[test]
